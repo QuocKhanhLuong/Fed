@@ -1,0 +1,392 @@
+"""
+QUIC Client for Federated Learning
+Connects to FL server, receives global model, trains locally, sends updates
+
+Optimized for:
+- Edge devices (Jetson Nano, ARM64)
+- Unstable networks (4G/WiFi)
+- Low bandwidth via QUIC + compression
+
+Author: Research Team - FL-QUIC-LoRA Project
+"""
+
+import asyncio
+import logging
+from typing import List, Optional, Callable, Any, Dict
+from pathlib import Path
+import numpy as np
+
+from aioquic.asyncio.client import connect
+from aioquic.quic.connection import QuicConnection
+from aioquic.quic.events import QuicEvent
+
+import sys
+sys.path.append(str(Path(__file__).parent.parent))
+
+from transport.quic_protocol import (
+    FLQuicProtocol,
+    FLMessageHandler,
+    create_quic_config,
+    StreamType
+)
+from transport.serializer import MessageCodec, ModelSerializer
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+class FLClientHandler(FLMessageHandler):
+    """
+    Client-side message handler for Federated Learning.
+    Processes global model from server and triggers local training.
+    """
+    
+    def __init__(self, client: 'FLQuicClient'):
+        """
+        Initialize client handler.
+        
+        Args:
+            client: Reference to the FL client
+        """
+        super().__init__()
+        self.client = client
+        logger.info("FLClientHandler initialized")
+    
+    async def handle_weights(self, stream_id: int, payload: bytes) -> None:
+        """
+        Handle global model weights from server.
+        
+        Args:
+            stream_id: Stream ID
+            payload: Serialized weights
+        """
+        try:
+            # Deserialize weights
+            weights = self.serializer.deserialize_weights(payload)
+            
+            logger.info(f"Received global model: {len(weights)} weight arrays")
+            
+            # Trigger local training with received weights
+            await self.client._on_global_model_received(weights)
+            
+        except Exception as e:
+            logger.error(f"Failed to handle weights: {e}")
+    
+    async def handle_config(self, stream_id: int, payload: bytes) -> None:
+        """
+        Handle configuration from server.
+        
+        Args:
+            stream_id: Stream ID
+            payload: Serialized config
+        """
+        try:
+            config = self.serializer.deserialize_metadata(payload)
+            logger.info(f"Received config from server: {config}")
+            
+            # Update client configuration
+            self.client.config.update(config)
+            
+        except Exception as e:
+            logger.error(f"Failed to handle config: {e}")
+
+
+class FLQuicClient:
+    """
+    QUIC-based Federated Learning Client.
+    Connects to server, trains locally, sends updates via QUIC.
+    """
+    
+    def __init__(
+        self,
+        server_host: str,
+        server_port: int,
+        client_id: Optional[str] = None,
+        local_train_fn: Optional[Callable] = None,
+        local_eval_fn: Optional[Callable] = None,
+    ):
+        """
+        Initialize FL client.
+        
+        Args:
+            server_host: Server hostname/IP
+            server_port: Server port
+            client_id: Unique client identifier
+            local_train_fn: Function for local training
+                           Signature: async def train(weights, config) -> (updated_weights, num_samples, metrics)
+            local_eval_fn: Function for local evaluation (optional)
+                          Signature: async def evaluate(weights, config) -> (loss, metrics)
+        """
+        self.server_host = server_host
+        self.server_port = server_port
+        self.client_id = client_id or f"client_{id(self)}"
+        
+        # Training callbacks
+        self.local_train_fn = local_train_fn
+        self.local_eval_fn = local_eval_fn
+        
+        # State
+        self.protocol: Optional[FLQuicProtocol] = None
+        self.connected = False
+        self.current_round = 0
+        self.config: Dict[str, Any] = {}
+        
+        # Synchronization
+        self._training_complete = asyncio.Event()
+        self._shutdown = asyncio.Event()
+        
+        # Statistics
+        self.stats = {
+            'rounds_completed': 0,
+            'updates_sent': 0,
+            'total_samples_trained': 0,
+        }
+        
+        # Message handler
+        self.message_handler = FLClientHandler(self)
+        
+        logger.info(f"FLQuicClient initialized: {client_id}, server={server_host}:{server_port}")
+    
+    async def connect(self) -> bool:
+        """
+        Connect to FL server via QUIC.
+        
+        Returns:
+            True if connected successfully
+        """
+        try:
+            # Create QUIC configuration
+            config = create_quic_config(is_client=True)
+            
+            logger.info(f"Connecting to {self.server_host}:{self.server_port}...")
+            
+            # Establish QUIC connection
+            async with connect(
+                host=self.server_host,
+                port=self.server_port,
+                configuration=config,
+                create_protocol=self._create_protocol,
+            ) as client:
+                self.protocol = client
+                
+                # Wait for handshake
+                connected = await self.protocol.wait_for_connection(timeout=10.0)
+                
+                if connected:
+                    self.connected = True
+                    logger.info(f"Connected to server via QUIC")
+                    
+                    # Send initial metadata
+                    await self._send_client_info()
+                    
+                    # Wait for shutdown or training completion
+                    await self._shutdown.wait()
+                else:
+                    logger.error("Connection handshake failed")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Connection failed: {e}")
+            return False
+    
+    def _create_protocol(self, quic: QuicConnection) -> FLQuicProtocol:
+        """
+        Factory method for creating protocol instance.
+        
+        Args:
+            quic: QUIC connection
+            
+        Returns:
+            FLQuicProtocol instance
+        """
+        protocol = FLQuicProtocol(
+            quic,
+            stream_handler=self.message_handler.handle_message
+        )
+        return protocol
+    
+    async def _send_client_info(self) -> None:
+        """Send client information to server"""
+        try:
+            metadata = {
+                'client_id': self.client_id,
+                'device_type': 'jetson_nano',  # Or detect automatically
+                'capabilities': {
+                    'gpu': True,
+                    'max_batch_size': 32,
+                },
+            }
+            
+            self.protocol.send_metadata(metadata)
+            logger.info("Sent client info to server")
+            
+        except Exception as e:
+            logger.error(f"Failed to send client info: {e}")
+    
+    async def _on_global_model_received(self, global_weights: List[np.ndarray]) -> None:
+        """
+        Callback when global model is received from server.
+        Triggers local training.
+        
+        Args:
+            global_weights: Global model weights from server
+        """
+        logger.info(f"Starting local training for round {self.current_round + 1}")
+        
+        try:
+            if self.local_train_fn is None:
+                logger.error("No training function provided!")
+                return
+            
+            # Perform local training
+            updated_weights, num_samples, metrics = await self.local_train_fn(
+                global_weights,
+                self.config
+            )
+            
+            logger.info(f"Local training complete: {num_samples} samples, metrics={metrics}")
+            
+            # Send update to server
+            await self._send_update(updated_weights, num_samples, metrics)
+            
+            # Update state
+            self.current_round += 1
+            self.stats['rounds_completed'] += 1
+            self.stats['total_samples_trained'] += num_samples
+            
+        except Exception as e:
+            logger.error(f"Local training failed: {e}")
+    
+    async def _send_update(
+        self,
+        weights: List[np.ndarray],
+        num_samples: int,
+        metrics: Dict[str, float]
+    ) -> None:
+        """
+        Send local update to server.
+        
+        Args:
+            weights: Updated model weights
+            num_samples: Number of training samples
+            metrics: Training metrics (loss, accuracy, etc.)
+        """
+        try:
+            # Send weights
+            logger.info(f"Sending update to server: {len(weights)} arrays, {num_samples} samples")
+            self.protocol.send_weights(weights)
+            
+            # Send metadata
+            metadata = {
+                'client_id': self.client_id,
+                'round': self.current_round,
+                'num_samples': num_samples,
+                'metrics': metrics,
+            }
+            self.protocol.send_metadata(metadata)
+            
+            self.stats['updates_sent'] += 1
+            logger.info("Update sent successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to send update: {e}")
+            raise
+    
+    async def run(self) -> None:
+        """Main client loop"""
+        logger.info(f"\n{'='*60}")
+        logger.info(f"STARTING FL CLIENT: {self.client_id}")
+        logger.info(f"{'='*60}")
+        
+        # Connect to server
+        connected = await self.connect()
+        
+        if not connected:
+            logger.error("Failed to connect to server")
+            return
+        
+        logger.info("Client running - waiting for global models...")
+        
+        # Keep running until shutdown
+        await self._shutdown.wait()
+        
+        logger.info(f"\n{'='*60}")
+        logger.info(f"CLIENT STOPPED: {self.client_id}")
+        logger.info(f"Rounds completed: {self.stats['rounds_completed']}")
+        logger.info(f"Updates sent: {self.stats['updates_sent']}")
+        logger.info(f"Total samples: {self.stats['total_samples_trained']}")
+        logger.info(f"{'='*60}")
+    
+    def shutdown(self) -> None:
+        """Shutdown the client gracefully"""
+        logger.info("Shutting down client...")
+        
+        if self.protocol:
+            try:
+                self.protocol.close(reason_phrase="Client shutdown")
+            except Exception as e:
+                logger.error(f"Error closing connection: {e}")
+        
+        self._shutdown.set()
+
+
+# Example training function for testing
+async def example_train_fn(
+    weights: List[np.ndarray],
+    config: Dict[str, Any]
+) -> tuple[List[np.ndarray], int, Dict[str, float]]:
+    """
+    Example training function (replace with actual implementation).
+    
+    Args:
+        weights: Global model weights
+        config: Training configuration
+        
+    Returns:
+        (updated_weights, num_samples, metrics)
+    """
+    logger.info("Example training function - simulating training...")
+    
+    # Simulate training delay
+    await asyncio.sleep(2.0)
+    
+    # Simulate weight updates (add small random noise)
+    updated_weights = [w + np.random.randn(*w.shape) * 0.01 for w in weights]
+    
+    # Simulate metrics
+    num_samples = 100
+    metrics = {
+        'loss': 0.5 + np.random.rand() * 0.1,
+        'accuracy': 0.8 + np.random.rand() * 0.1,
+    }
+    
+    return updated_weights, num_samples, metrics
+
+
+async def main():
+    """Entry point for running the client"""
+    # Client configuration
+    client = FLQuicClient(
+        server_host="localhost",  # Change to server IP
+        server_port=4433,
+        client_id="test_client_1",
+        local_train_fn=example_train_fn,  # Replace with actual training function
+    )
+    
+    try:
+        await client.run()
+    except KeyboardInterrupt:
+        logger.info("Client interrupted by user")
+        client.shutdown()
+    except Exception as e:
+        logger.error(f"Client error: {e}")
+        raise
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
