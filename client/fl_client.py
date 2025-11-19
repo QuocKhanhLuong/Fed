@@ -65,8 +65,8 @@ class FLClient(fl.client.NumPyClient if HAS_FLOWER else object):
         Returns:
             List of NumPy arrays (model weights)
         """
-        logger.info("Extracting model parameters...")
-        parameters = self.trainer.get_parameters()
+        logger.info("Extracting model parameters (Adaptive Pruning)...")
+        parameters = self.trainer.get_adaptive_parameters()
         logger.info(f"Extracted {len(parameters)} parameter arrays")
         return parameters
     
@@ -120,8 +120,8 @@ class FLClient(fl.client.NumPyClient if HAS_FLOWER else object):
             global_weights=global_weights_copy
         )
         
-        # Extract updated parameters
-        updated_parameters = self.trainer.get_parameters()
+        # Extract updated parameters (Adaptive Pruning)
+        updated_parameters = self.trainer.get_adaptive_parameters()
         
         num_samples = metrics['num_samples']
         
@@ -177,6 +177,7 @@ def create_fl_client(
     local_epochs: int = 3,
     learning_rate: float = 1e-3,
     use_dummy_data: bool = True,
+    network_monitor: Optional[Any] = None,  # <--- NEW
 ) -> FLClient:
     """
     Factory function to create FL client.
@@ -187,6 +188,7 @@ def create_fl_client(
         local_epochs: Epochs per round
         learning_rate: Learning rate
         use_dummy_data: Use dummy dataset (for testing)
+        network_monitor: NetworkMonitor instance
         
     Returns:
         FLClient instance
@@ -198,6 +200,7 @@ def create_fl_client(
         lora_r=lora_r,
         lora_alpha=lora_r * 2,
         use_mixed_precision=True,
+        network_monitor=network_monitor,  # <--- Pass network_monitor
     )
     
     # Create data loaders

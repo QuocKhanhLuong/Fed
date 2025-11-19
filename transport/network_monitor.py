@@ -28,10 +28,10 @@ class NetworkMonitor:
         self.loss_history = deque(maxlen=window_size)
         self.window_size = window_size
         
-        # Thresholds for scoring
-        self.min_rtt = 0.020  # 20ms (Excellent)
-        self.max_rtt = 0.500  # 500ms (Poor)
-        self.max_loss = 0.10  # 10% packet loss (Poor)
+        # Thresholds for scoring (More realistic for FL over WAN)
+        self.min_rtt = 0.010  # 10ms (Excellent - LAN)
+        self.max_rtt = 0.300  # 300ms (Poor - Acceptable for FL)
+        self.max_loss = 0.05  # 5% packet loss (Poor)
         
         self.current_score = 1.0
         self.last_update = time.time()

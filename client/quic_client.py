@@ -30,6 +30,7 @@ from transport.quic_protocol import (
     StreamType
 )
 from transport.serializer import MessageCodec, ModelSerializer
+from transport.network_monitor import NetworkMonitor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,6 +108,7 @@ class FLQuicClient:
         client_id: Optional[str] = None,
         local_train_fn: Optional[Callable] = None,
         local_eval_fn: Optional[Callable] = None,
+        network_monitor: Optional[NetworkMonitor] = None,
     ):
         """
         Initialize FL client.
@@ -119,6 +121,7 @@ class FLQuicClient:
                            Signature: async def train(weights, config) -> (updated_weights, num_samples, metrics)
             local_eval_fn: Function for local evaluation (optional)
                           Signature: async def evaluate(weights, config) -> (loss, metrics)
+            network_monitor: NetworkMonitor instance for tracking network quality
         """
         self.server_host = server_host
         self.server_port = server_port
@@ -127,6 +130,9 @@ class FLQuicClient:
         # Training callbacks
         self.local_train_fn = local_train_fn
         self.local_eval_fn = local_eval_fn
+        
+        # Network monitoring
+        self.network_monitor = network_monitor or NetworkMonitor()
         
         # State
         self.protocol: Optional[FLQuicProtocol] = None
@@ -277,6 +283,10 @@ class FLQuicClient:
             metrics: Training metrics (loss, accuracy, etc.)
         """
         try:
+            # Record send time for RTT calculation
+            import time
+            send_time = time.time()
+            
             # Send weights
             logger.info(f"Sending update to server: {len(weights)} arrays, {num_samples} samples")
             self.protocol.send_weights(weights)
@@ -287,11 +297,25 @@ class FLQuicClient:
                 'round': self.current_round,
                 'num_samples': num_samples,
                 'metrics': metrics,
+                'send_timestamp': send_time,  # For server to calculate RTT
             }
             self.protocol.send_metadata(metadata)
             
             self.stats['updates_sent'] += 1
             logger.info("Update sent successfully")
+            
+            # Update network stats if QUIC connection provides RTT
+            if hasattr(self.protocol, '_quic') and hasattr(self.protocol._quic, '_loss'):
+                # Get QUIC statistics
+                quic_stats = self.protocol._quic._loss
+                if hasattr(quic_stats, 'get_probe_needed'):
+                    # Extract RTT from QUIC connection
+                    rtt = getattr(quic_stats, 'smoothed_rtt', 0.1)
+                    loss_rate = getattr(quic_stats, 'loss_rate', 0.0)
+                    
+                    # Update network monitor
+                    self.network_monitor.update_stats(rtt, loss_rate)
+                    logger.debug(f"Network stats updated: RTT={rtt*1000:.1f}ms, Loss={loss_rate*100:.1f}%")
             
         except Exception as e:
             logger.error(f"Failed to send update: {e}")

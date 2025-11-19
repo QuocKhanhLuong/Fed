@@ -23,11 +23,12 @@ from pathlib import Path
 # Hugging Face Transformers
 try:
     from transformers import MobileViTForImageClassification, MobileViTConfig
-    from peft import LoraConfig, get_peft_model, TaskType
+    from peft import LoraConfig, get_peft_model
+    from peft.utils import TaskType
     HAS_TRANSFORMERS = True
-except ImportError:
+except ImportError as e:
     HAS_TRANSFORMERS = False
-    logging.warning("transformers/peft not installed - using mock model")
+    logging.warning(f"transformers/peft not installed - using mock model: {e}")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class MobileViTLoRATrainer:
         lora_dropout: float = 0.1,
         device: str = "auto",
         use_mixed_precision: bool = True,
+        network_monitor: Optional[Any] = None,  # <--- NEW
     ):
         """
         Initialize the trainer.
@@ -60,6 +62,7 @@ class MobileViTLoRATrainer:
             lora_dropout: Dropout for LoRA layers
             device: Device to use ('cuda', 'cpu', or 'auto')
             use_mixed_precision: Use FP16 training
+            network_monitor: NetworkMonitor instance for adaptive logic
         """
         self.num_classes = num_classes
         self.model_name = model_name
@@ -67,6 +70,7 @@ class MobileViTLoRATrainer:
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
         self.use_mixed_precision = use_mixed_precision
+        self.network_monitor = network_monitor  # Store reference
         
         # Auto-detect device
         if device == "auto":
@@ -79,6 +83,9 @@ class MobileViTLoRATrainer:
         # Build model
         self.model = self._build_model()
         self.model.to(self.device)
+        
+        # Check if using mock model
+        self.is_mock_model = not HAS_TRANSFORMERS or isinstance(self.model, nn.Module) and self.model.__class__.__name__ == 'SimpleCNN'
         
         # Mixed precision scaler
         self.scaler = torch.cuda.amp.GradScaler() if use_mixed_precision and self.device.type == "cuda" else None
@@ -110,11 +117,11 @@ class MobileViTLoRATrainer:
             
             # Configure LoRA
             lora_config = LoraConfig(
-                task_type=TaskType.IMAGE_CLASSIFICATION,
+                task_type=TaskType.FEATURE_EXTRACTION,  # Use FEATURE_EXTRACTION for ViT models
                 r=self.lora_r,
                 lora_alpha=self.lora_alpha,
                 lora_dropout=self.lora_dropout,
-                target_modules=["qkv"],  # Target attention layers
+                target_modules=["query", "key", "value"],  # Target attention Q, K, V
                 bias="none",
             )
             
@@ -199,6 +206,81 @@ class MobileViTLoRATrainer:
                     parameters.append(param.detach().cpu().numpy())
         
         logger.debug(f"Extracted {len(parameters)} parameter arrays")
+        return parameters
+
+    def get_adaptive_parameters(self) -> List[np.ndarray]:
+        """
+        Extract and Prune parameters based on Network Quality.
+        Returns sparse weights (zeros) to be compressed by LZ4.
+        """
+        # 1. Determine Network Score
+        score = 1.0
+        if self.network_monitor:
+            score = self.network_monitor.get_network_score()
+        
+        # 2. Calculate Keep Ratio (Dynamic Pruning)
+        # Good Network (>0.8) -> Keep 100%
+        # Poor Network (0.0) -> Keep min 10%
+        if score >= 0.8:
+            keep_ratio = 1.0
+        else:
+            # Linear interpolation: 0.0 -> 0.1, 0.8 -> 1.0
+            keep_ratio = 0.1 + (0.9 * (score / 0.8))
+            
+        logger.info(f"Network Score: {score:.2f} -> Pruning Keep Ratio: {keep_ratio:.2%}")
+
+        parameters = []
+        
+        # 3. Iterate through params (Logic similar to get_parameters but with Pruning)
+        # Note: Only process LoRA params or trainable params
+        if HAS_TRANSFORMERS and not self.is_mock_model:
+            # Real transformers model - only extract LoRA params
+            iterator = [(n, p) for n, p in self.model.named_parameters() 
+                       if 'lora' in n.lower() and p.requires_grad]
+        else:
+            # Mock model or no transformers - extract all trainable params
+            iterator = [(f"param_{i}", p) for i, p in enumerate(self.model.parameters()) 
+                       if p.requires_grad]
+
+        for name, param in iterator:
+            # Work on a copy to avoid affecting the original model
+            tensor = param.detach().clone()
+            
+            # Perform Pruning if needed
+            if keep_ratio < 1.0:
+                # Calculate Threshold at k-th percentile
+                # Example: keep 20% -> Threshold is the value at top 20%
+                numel = tensor.numel()
+                k = int(numel * keep_ratio)
+                
+                if k < 1: k = 1 # Always keep at least 1 element
+                
+                # Find top-k value by absolute magnitude
+                # flatten() to 1D, abs() for magnitude
+                threshold_val = torch.kthvalue(
+                    tensor.abs().flatten(), 
+                    numel - k + 1
+                ).values
+                
+                # Create mask: Keep values >= threshold
+                mask = tensor.abs() >= threshold_val
+                
+                # Set unimportant values to 0
+                tensor = tensor * mask
+                
+            # Convert to Numpy and add to list
+            parameters.append(tensor.cpu().numpy())
+        
+        # Log pruning statistics
+        total_params = sum(p.size for p in parameters)
+        if keep_ratio < 1.0:
+            zero_params = sum(np.count_nonzero(p == 0) for p in parameters)
+            sparsity = zero_params / total_params if total_params > 0 else 0
+            logger.info(f"Adaptive Pruning: {len(parameters)} arrays, "
+                       f"{total_params:,} params, {sparsity:.1%} zeros (LZ4 will compress these)")
+        else:
+            logger.debug(f"No pruning applied: {len(parameters)} arrays, {total_params:,} params")
+
         return parameters
     
     def set_parameters(self, parameters: List[np.ndarray]) -> None:

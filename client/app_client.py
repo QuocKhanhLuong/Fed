@@ -59,7 +59,12 @@ class FLClientApp:
         self.client_id = client_id
         self.config = config
         
-        # Create Flower client
+        # Create NetworkMonitor
+        from transport.network_monitor import NetworkMonitor
+        logger.info("Creating NetworkMonitor...")
+        self.network_monitor = NetworkMonitor(window_size=20)
+        
+        # Create Flower client with NetworkMonitor
         logger.info("Creating Flower client...")
         self.fl_client = create_fl_client(
             num_classes=config.model.num_classes,
@@ -67,6 +72,7 @@ class FLClientApp:
             local_epochs=config.training.local_epochs,
             learning_rate=config.training.learning_rate,
             use_dummy_data=True,  # TODO: Load real dataset
+            network_monitor=self.network_monitor,  # Pass NetworkMonitor
         )
         
         # Create async training function for QUIC client
@@ -79,13 +85,14 @@ class FLClientApp:
             )
             return updated_weights, num_samples, metrics
         
-        # Create QUIC client
+        # Create QUIC client with NetworkMonitor
         logger.info("Creating QUIC client...")
         self.quic_client = FLQuicClient(
             server_host=server_host,
             server_port=server_port,
             client_id=client_id,
             local_train_fn=train_callback,
+            network_monitor=self.network_monitor,  # Pass same NetworkMonitor
         )
         
         logger.info(f"FL Client App initialized: {client_id}")
