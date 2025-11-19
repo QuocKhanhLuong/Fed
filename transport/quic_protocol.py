@@ -129,9 +129,20 @@ class FLQuicProtocol(QuicConnectionProtocol):
         # Update statistics
         self._stats['bytes_received'] += len(data)
         
+        # Buffer Management
+        MAX_BUFFER_SIZE = 50 * 1024 * 1024  # 50 MB limit
+        
         # Initialize buffer if needed
         if stream_id not in self._receive_buffers:
             self._receive_buffers[stream_id] = bytearray()
+        
+        # Check buffer size (Backpressure)
+        current_size = len(self._receive_buffers[stream_id])
+        if current_size + len(data) > MAX_BUFFER_SIZE:
+            logger.warning(f"Buffer overflow for stream {stream_id} (size={current_size}). Dropping packet.")
+            # Option: Reset stream to signal congestion
+            # self._quic.send_stream_reset(stream_id, 0x1) 
+            return
         
         # Append data to buffer
         self._receive_buffers[stream_id].extend(data)
@@ -147,29 +158,45 @@ class FLQuicProtocol(QuicConnectionProtocol):
     def _process_stream_buffer(self, stream_id: int) -> None:
         """
         Process a complete stream buffer and invoke handler.
+        Supports multiple messages in a single stream (Multiplexing).
         
         Args:
             stream_id: QUIC stream ID
         """
         try:
-            buffer = bytes(self._receive_buffers[stream_id])
+            buffer = self._receive_buffers[stream_id]
             
-            if len(buffer) == 0:
-                logger.warning(f"Empty buffer for stream {stream_id}")
-                return
-            
-            # Decode message
-            msg_type, payload = self._codec.decode_message(buffer)
-            self._stats['messages_received'] += 1
-            
-            logger.debug(f"Received message on stream {stream_id}: "
-                        f"type={msg_type}, size={len(payload)}")
-            
-            # Invoke handler if set
-            if self._stream_handler:
-                asyncio.create_task(
-                    self._stream_handler(stream_id, msg_type, payload)
-                )
+            while len(buffer) > 0:
+                # Need at least header (5 bytes)
+                if len(buffer) < 5:
+                    break
+                    
+                # Peek length
+                import struct
+                length = struct.unpack('>I', buffer[0:4])[0]
+                
+                # Check if we have full message
+                if len(buffer) < 5 + length:
+                    break
+                
+                # Extract full message data
+                msg_data = buffer[:5+length]
+                
+                # Decode message
+                msg_type, payload = self._codec.decode_message(msg_data)
+                self._stats['messages_received'] += 1
+                
+                logger.debug(f"Received message on stream {stream_id}: "
+                            f"type={msg_type}, size={len(payload)}")
+                
+                # Invoke handler if set
+                if self._stream_handler:
+                    asyncio.create_task(
+                        self._stream_handler(stream_id, msg_type, payload)
+                    )
+                
+                # Remove processed message from buffer
+                del buffer[:5+length]
             
         except Exception as e:
             logger.error(f"Failed to process stream {stream_id}: {e}")
@@ -229,6 +256,13 @@ class FLQuicProtocol(QuicConnectionProtocol):
         logger.debug(f"Created stream {stream_id} for {stream_type.name}")
         return stream_id
     
+    def _get_existing_stream(self, stream_type: StreamType) -> Optional[int]:
+        """Find an existing stream of the given type."""
+        for stream_id, stype in self._active_streams.items():
+            if stype == stream_type:
+                return stream_id
+        return None
+
     def send_message(self, stream_id: int, msg_type: int, payload: bytes, 
                     end_stream: bool = True) -> None:
         """
@@ -264,6 +298,7 @@ class FLQuicProtocol(QuicConnectionProtocol):
     def send_weights(self, weights: List, stream_id: Optional[int] = None) -> int:
         """
         Send model weights (NumPy arrays) via QUIC.
+        Reuses existing WEIGHTS stream if available (Multiplexing).
         
         Args:
             weights: List of NumPy arrays
@@ -278,10 +313,12 @@ class FLQuicProtocol(QuicConnectionProtocol):
             
             # Create or use stream
             if stream_id is None:
-                stream_id = self.create_stream(StreamType.WEIGHTS)
+                stream_id = self._get_existing_stream(StreamType.WEIGHTS)
+                if stream_id is None:
+                    stream_id = self.create_stream(StreamType.WEIGHTS)
             
-            # Send
-            self.send_message(stream_id, MessageCodec.MSG_TYPE_WEIGHTS, payload)
+            # Send (keep stream open for multiplexing)
+            self.send_message(stream_id, MessageCodec.MSG_TYPE_WEIGHTS, payload, end_stream=False)
             
             logger.info(f"Sent {len(weights)} weight arrays on stream {stream_id}")
             return stream_id
@@ -293,6 +330,7 @@ class FLQuicProtocol(QuicConnectionProtocol):
     def send_metadata(self, metadata: Dict[str, Any], stream_id: Optional[int] = None) -> int:
         """
         Send metadata (metrics, config, etc.) via QUIC.
+        Reuses existing METADATA stream if available (Multiplexing).
         
         Args:
             metadata: Dictionary of metadata
@@ -307,10 +345,12 @@ class FLQuicProtocol(QuicConnectionProtocol):
             
             # Create or use stream
             if stream_id is None:
-                stream_id = self.create_stream(StreamType.METADATA)
+                stream_id = self._get_existing_stream(StreamType.METADATA)
+                if stream_id is None:
+                    stream_id = self.create_stream(StreamType.METADATA)
             
-            # Send
-            self.send_message(stream_id, MessageCodec.MSG_TYPE_METADATA, payload)
+            # Send (keep stream open for multiplexing)
+            self.send_message(stream_id, MessageCodec.MSG_TYPE_METADATA, payload, end_stream=False)
             
             logger.debug(f"Sent metadata on stream {stream_id}")
             return stream_id
@@ -414,6 +454,26 @@ class FLMessageHandler:
         logger.error(f"Received error from stream {stream_id}: {error_msg}")
 
 
+class SessionTicketHandler:
+    """
+    Handles saving and loading of QUIC session tickets for 0-RTT.
+    """
+    def __init__(self):
+        self.tickets: Dict[str, Any] = {}
+        
+    def save_ticket(self, ticket: Any) -> None:
+        """Save session ticket"""
+        # In a real app, persist this to disk
+        logger.info("Saving QUIC session ticket for 0-RTT")
+        self.tickets['latest'] = ticket
+        
+    def load_ticket(self, key: str = 'latest') -> Optional[Any]:
+        """Load session ticket"""
+        return self.tickets.get(key)
+
+# Global handler instance
+ticket_handler = SessionTicketHandler()
+
 def create_quic_config(
     is_client: bool,
     cert_file: Optional[str] = None,
@@ -465,6 +525,14 @@ def create_quic_config(
             # For development: skip verification
             import ssl
             config.verify_mode = ssl.CERT_NONE
+            
+        # 0-RTT Session Ticket Handling
+        if enable_0rtt:
+            config.session_ticket_handler = ticket_handler.save_ticket
+            ticket = ticket_handler.load_ticket()
+            if ticket:
+                config.session_ticket = ticket
+                logger.info("Loaded session ticket for 0-RTT")
     
     logger.info(f"QUIC config created: client={is_client}, 0-RTT={enable_0rtt}")
     return config

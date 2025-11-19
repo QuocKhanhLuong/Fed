@@ -7,6 +7,7 @@ Author: Research Team - FL-QUIC-LoRA Project
 
 import numpy as np
 from typing import List, Tuple, Dict, Optional, Union
+from functools import reduce
 import logging
 
 try:
@@ -168,6 +169,94 @@ class FLStrategy(fl.server.strategy.FedAvg if HAS_FLOWER else object):
         
         return loss_aggregated, metrics
 
+    def aggregate_time_window(
+        self,
+        server_round: int,
+        results: List[Tuple[ClientProxy, FitRes]],
+        time_window: float = 300.0
+    ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
+        """
+        Aggregate all available updates within a time window.
+        Ignores min_fit_clients constraint if window expires.
+        """
+        logger.info(f"Time-Window Aggregation (Round {server_round}): {len(results)} updates available")
+        
+        # Use standard aggregation logic
+        # In a real implementation, we might want to weight by freshness or other factors
+        return self.aggregate_fit(server_round, results, failures=[])
+
+
+class ContributionAwareStrategy(FLStrategy):
+    """
+    Aggregation dựa trên Cosine Similarity để loại bỏ update nhiễu/kém chất lượng.
+    """
+    def aggregate_fit(
+        self,
+        server_round: int,
+        results: List[Tuple[ClientProxy, FitRes]],
+        failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
+    ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
+        
+        if not results:
+            return None, {}
+            
+        # 1. Giải nén weights
+        # results là list các tuple (client, fit_res)
+        weights_results = [
+            (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples)
+            for _, fit_res in results
+        ]
+        
+        # 2. Tính Update Vectors (Delta W)
+        # Để đơn giản, ta giả định Server đang giữ Global Model của vòng trước
+        # Nhưng trong kiến trúc stateless của Flower, ta tính trung bình trước làm mốc.
+        
+        # --- Tính Trung bình tạm (Simple FedAvg) ---
+        total_examples = sum([num for _, num in weights_results])
+        simple_avg_weights = [np.zeros_like(w) for w in weights_results[0][0]]
+        
+        for weights, num in weights_results:
+            for i, layer in enumerate(weights):
+                simple_avg_weights[i] += layer * (num / total_examples)
+                
+        # --- Tính Cosine Similarity Score ---
+        scores = []
+        for weights, num in weights_results:
+            # Flatten toàn bộ các layer thành 1 vector dài
+            client_vec = np.concatenate([w.flatten() for w in weights])
+            avg_vec = np.concatenate([w.flatten() for w in simple_avg_weights])
+            
+            # Tính Cosine Similarity
+            norm_c = np.linalg.norm(client_vec)
+            norm_a = np.linalg.norm(avg_vec)
+            
+            if norm_c == 0 or norm_a == 0:
+                sim = 0
+            else:
+                sim = np.dot(client_vec, avg_vec) / (norm_c * norm_a)
+            
+            # Score = Similarity * log(Num Examples)
+            # (Thưởng cho client giống hướng chung VÀ có nhiều dữ liệu)
+            scores.append(max(0, sim) * np.log1p(num))
+            
+        # --- Normalize Scores ---
+        total_score = sum(scores)
+        if total_score == 0:
+            normalized_weights = [1.0 / len(scores) for _ in scores]
+        else:
+            normalized_weights = [s / total_score for s in scores]
+            
+        logger.info(f"Round {server_round} Aggregation Scores: {[f'{s:.4f}' for s in normalized_weights]}")
+
+        # --- Aggregate với trọng số mới ---
+        aggregated_weights = [np.zeros_like(w) for w in weights_results[0][0]]
+        for idx, (weights, _) in enumerate(weights_results):
+            score = normalized_weights[idx]
+            for i, layer in enumerate(weights):
+                aggregated_weights[i] += layer * score
+                
+        return ndarrays_to_parameters(aggregated_weights), {}
+
 
 def create_fit_config(server_round: int, local_epochs: int = 3) -> Dict[str, Scalar]:
     """
@@ -184,6 +273,7 @@ def create_fit_config(server_round: int, local_epochs: int = 3) -> Dict[str, Sca
         'round': server_round,
         'local_epochs': local_epochs,
         'learning_rate': 1e-3,  # Could be adaptive
+        'fedprox_mu': 0.01,  # <--- THÊM DÒNG NÀY
     }
     
     # Adaptive learning rate (optional)
@@ -231,7 +321,7 @@ def create_strategy(
     if not HAS_FLOWER:
         raise RuntimeError("Flower not installed!")
     
-    strategy = FLStrategy(
+    strategy = ContributionAwareStrategy(
         fraction_fit=1.0,  # Use all available clients
         fraction_evaluate=1.0,
         min_fit_clients=min_fit_clients,

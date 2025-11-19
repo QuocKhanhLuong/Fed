@@ -66,6 +66,7 @@ class TrainingConfig:
     learning_rate: float = 1e-3
     optimizer: str = "adamw"
     weight_decay: float = 0.01
+    fedprox_mu: float = 0.01
     
     # Training
     local_epochs: int = 3

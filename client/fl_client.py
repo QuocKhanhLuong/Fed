@@ -103,15 +103,21 @@ class FLClient(fl.client.NumPyClient if HAS_FLOWER else object):
         # Set global parameters
         self.set_parameters(parameters)
         
+        # Lưu lại global weights trước khi set vào model (để tính FedProx)
+        global_weights_copy = [np.copy(w) for w in parameters]
+        
         # Get training config
         epochs = int(config.get('local_epochs', self.local_epochs))
         lr = float(config.get('learning_rate', self.learning_rate))
+        mu = float(config.get('fedprox_mu', 0.01)) # Lấy từ config server gửi xuống
         
         # Train locally
         metrics = self.trainer.train(
             self.train_loader,
             epochs=epochs,
             learning_rate=lr,
+            fedprox_mu=mu,
+            global_weights=global_weights_copy
         )
         
         # Extract updated parameters

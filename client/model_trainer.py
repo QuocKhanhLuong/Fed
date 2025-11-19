@@ -121,7 +121,11 @@ class MobileViTLoRATrainer:
             # Apply LoRA
             model = get_peft_model(model, lora_config)
             
-            logger.info("LoRA applied successfully")
+            # Wrap with Adaptive Model
+            from .adaptive_model import AdaptiveMobileViT
+            model = AdaptiveMobileViT(model)
+            
+            logger.info("LoRA applied and wrapped with AdaptiveMobileViT")
             return model
             
         except Exception as e:
@@ -234,6 +238,9 @@ class MobileViTLoRATrainer:
         epochs: int = 1,
         learning_rate: float = 1e-3,
         weight_decay: float = 0.01,
+        fedprox_mu: float = 0.0,       
+        global_weights: List[np.ndarray] = None,
+        network_monitor: Optional[Any] = None  # <--- NEW
     ) -> Dict[str, float]:
         """
         Train the model locally.
@@ -275,18 +282,34 @@ class MobileViTLoRATrainer:
                 # Forward pass with mixed precision
                 if self.use_mixed_precision and self.scaler:
                     with torch.cuda.amp.autocast():
-                        outputs = self.model(pixel_values=images)
+                        # Get network score
+                        quality_score = 1.0
+                        if network_monitor:
+                            quality_score = network_monitor.get_network_score()
+                            if hasattr(self.model, 'set_quality_score'):
+                                self.model.set_quality_score(quality_score)
+
+                        outputs = self.model(pixel_values=images, quality_score=quality_score)
                         logits = outputs["logits"] if isinstance(outputs, dict) else outputs
-                        loss = F.cross_entropy(logits, labels)
+                        task_loss = F.cross_entropy(logits, labels)
+                        
+                        loss = task_loss
+                        if fedprox_mu > 0 and global_weights is not None:
+                            prox_loss = self._compute_proximal_loss(global_weights, fedprox_mu)
+                            loss += prox_loss
                     
-                    # Backward pass
                     self.scaler.scale(loss).backward()
                     self.scaler.step(optimizer)
                     self.scaler.update()
                 else:
                     outputs = self.model(pixel_values=images)
                     logits = outputs["logits"] if isinstance(outputs, dict) else outputs
-                    loss = F.cross_entropy(logits, labels)
+                    task_loss = F.cross_entropy(logits, labels)
+                    
+                    loss = task_loss
+                    if fedprox_mu > 0 and global_weights is not None:
+                        prox_loss = self._compute_proximal_loss(global_weights, fedprox_mu)
+                        loss += prox_loss
                     
                     loss.backward()
                     optimizer.step()
@@ -363,6 +386,34 @@ class MobileViTLoRATrainer:
                    f"Accuracy={metrics['accuracy']:.4f}")
         
         return metrics
+    
+    def _compute_proximal_loss(self, global_weights: List[np.ndarray], mu: float) -> torch.Tensor:
+        """Tính toán FedProx regularization term"""
+        proximal_term = 0.0
+        
+        # Lấy các tham số hiện tại của model (đang train)
+        # Lưu ý: get_parameters() của bạn trả về list numpy, nhưng ở đây ta cần tensor
+        # để giữ được gradient graph. Vì vậy ta duyệt qua model.parameters() trực tiếp.
+        
+        # Tạo iterator cho global weights (đã flatten hoặc theo layer)
+        # Ở đây ta giả định thứ tự parameters khớp với get_parameters()
+        
+        # 1. Chỉ lấy các tham số cần train (LoRA)
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        
+        # 2. Kiểm tra khớp số lượng
+        if len(trainable_params) != len(global_weights):
+            return torch.tensor(0.0).to(self.device)
+
+        # 3. Tính khoảng cách L2
+        for param, global_w in zip(trainable_params, global_weights):
+            # Chuyển global weight (numpy) sang tensor trên cùng device
+            global_w_tensor = torch.tensor(global_w).to(self.device)
+            
+            # Cộng dồn norm^2
+            proximal_term += (param - global_w_tensor).norm(2) ** 2
+
+        return (mu / 2.0) * proximal_term
 
 
 def create_dummy_dataset(
