@@ -36,7 +36,7 @@ class FederatedConfig:
     client_fraction: float = 1.0  # Fraction of clients to sample per round
     
     # Aggregation strategy
-    aggregation_strategy: str = "FedAvg"  # FedAvg, FedProx, etc.
+    aggregation_strategy: str = "FedProx"  # FedAvg, FedProx, etc.
     
     # Convergence tracking
     target_accuracy: float = 0.80  # Target accuracy for convergence detection
@@ -52,7 +52,7 @@ class ModelConfig:
     image_size: int = 224
     
     # LoRA settings (Feature D)
-    use_lora: bool = False  # Use LoRA for parameter-efficient fine-tuning
+    use_lora: bool = True  # Use LoRA for parameter-efficient fine-tuning
     lora_r: int = 8  # LoRA rank
     lora_alpha: int = 16  # Scaling factor
     lora_dropout: float = 0.1

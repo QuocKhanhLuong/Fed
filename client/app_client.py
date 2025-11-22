@@ -204,6 +204,11 @@ async def main():
         action="store_true",
         help="Enable Test-Time Adaptation"
     )
+    parser.add_argument(
+        "--use-lora",
+        action="store_true",
+        help="Enable LoRA (Low-Rank Adaptation)"
+    )
     
     args = parser.parse_args()
     
@@ -222,6 +227,7 @@ async def main():
     
     # Override config from args
     config.model.lora_r = args.lora_rank
+    config.model.use_lora = args.use_lora
     config.training.local_epochs = args.local_epochs
     config.training.dataset_name = args.dataset
     config.training.partition_alpha = args.alpha
