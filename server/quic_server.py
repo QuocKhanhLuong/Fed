@@ -33,7 +33,7 @@ from transport.quic_protocol import (
     create_quic_config,
     StreamType
 )
-from transport.serializer import MessageCodec, ModelSerializer
+from transport.serializer import ModelSerializer
 
 logging.basicConfig(
     level=logging.INFO,

@@ -9,7 +9,6 @@ from .quic_protocol import (
 from .serializer import (
     ModelSerializer,
     MessageCodec,
-    default_serializer,
 )
 
 __all__ = [
@@ -19,5 +18,4 @@ __all__ = [
     'create_quic_config',
     'ModelSerializer',
     'MessageCodec',
-    'default_serializer',
 ]

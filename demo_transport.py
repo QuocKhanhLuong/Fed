@@ -19,7 +19,7 @@ print("="*70)
 
 print("\n📦 Importing transport modules...")
 try:
-    from transport.serializer import ModelSerializer, MessageCodec
+    from transport.serializer import ModelSerializer
     print("✅ Import successful!")
 except ImportError as e:
     print(f"❌ Import failed: {e}")
@@ -81,21 +81,23 @@ print(f"Compressed size: {len(compressed_no_quant):,} bytes ({len(compressed_no_
 print(f"Compression ratio: {ratio_no_quant:.2f}x")
 print(f"Bandwidth saved: {(1 - 1/ratio_no_quant)*100:.1f}%")
 
-# Message encoding
+# Message encoding removed - MessageCodec was simplified
 print("\n" + "-"*70)
-print("4. Testing Message Encoding")
+print("4. Comparing Quantization vs No Quantization")
 print("-"*70)
 
-message = MessageCodec.encode_message(MessageCodec.MSG_TYPE_WEIGHTS, compressed_quant)
-print(f"Message format: [4-byte length][1-byte type][payload]")
-print(f"Encoded message size: {len(message):,} bytes")
-print(f"Overhead: {len(message) - len(compressed_quant)} bytes")
+improvement = ratio_quant / ratio_no_quant
+print(f"Quantization improvement: {improvement:.2f}x better compression")
+print(f"Extra bandwidth saved: {(1 - 1/improvement)*100:.1f}%")
 
-# Decode
-msg_type, payload = MessageCodec.decode_message(message)
-print(f"Decoded message type: 0x{msg_type:02X} (WEIGHTS)")
-print(f"Payload size: {len(payload):,} bytes")
-print(f"Integrity check: {'✅ PASS' if payload == compressed_quant else '❌ FAIL'}")
+# Summary
+print("\n" + "="*70)
+print("Summary")
+print("="*70)
+print(f"\nOriginal size: {total_size/1024:.2f} KB")
+print(f"With Quantization: {len(compressed_quant)/1024:.2f} KB ({ratio_quant:.2f}x)")
+print(f"Without Quantization: {len(compressed_no_quant)/1024:.2f} KB ({ratio_no_quant:.2f}x)")
+print(f"\n✅ Per-channel quantization + LZ4 achieves {improvement:.2f}x better compression!")
 
 # Summary
 print("\n" + "="*70)

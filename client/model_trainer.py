@@ -20,15 +20,15 @@ import numpy as np
 import logging
 from pathlib import Path
 
-# Hugging Face Transformers
 try:
-    from transformers import MobileViTForImageClassification, MobileViTConfig
-    from peft import LoraConfig, get_peft_model
-    from peft.utils import TaskType
-    HAS_TRANSFORMERS = True
+    import sys
+    import os
+    import timm
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from models.gated_mobilevit import GatedBlockWrapper
 except ImportError as e:
-    HAS_TRANSFORMERS = False
-    logging.warning(f"transformers/peft not installed - using mock model: {e}")
+    logging.error(f"Failed to import dependencies: {e}")
+    raise
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -84,8 +84,14 @@ class MobileViTLoRATrainer:
         self.model = self._build_model()
         self.model.to(self.device)
         
-        # Check if using mock model
-        self.is_mock_model = not HAS_TRANSFORMERS or isinstance(self.model, nn.Module) and self.model.__class__.__name__ == 'SimpleCNN'
+        # Inject Gating
+        self._inject_gating()
+        
+        # Freeze Backbone
+        self._freeze_backbone()
+        
+        # No mock model check needed
+        self.is_mock_model = False
         
         # Mixed precision scaler
         self.scaler = torch.cuda.amp.GradScaler() if use_mixed_precision and self.device.type == "cuda" else None
@@ -100,71 +106,66 @@ class MobileViTLoRATrainer:
         logger.info(f"Model initialized: {self.stats}")
     
     def _build_model(self) -> nn.Module:
-        """Build MobileViT model with LoRA adaptation"""
+        """Build MobileViTv2 model using timm"""
+        logger.info(f"Initializing MobileViTv2 (timm) for {self.num_classes} classes")
+        # Create model using timm
+        model = timm.create_model('mobilevitv2_050.cvnets_in1k', pretrained=True, num_classes=self.num_classes)
+        return model
+
+    def _inject_gating(self):
+        """Inject GatedBlockWrapper into the model"""
+        logger.info("Injecting GatedBlockWrapper into MobileViT blocks...")
+        from timm.models.mobilevit import MobileVitV2Block
         
-        if not HAS_TRANSFORMERS:
-            logger.warning("Using mock model - install transformers and peft")
-            return self._build_mock_model()
+        modules_to_replace = []
+        for name, module in self.model.named_modules():
+            if isinstance(module, MobileVitV2Block):
+                modules_to_replace.append((name, module))
         
-        try:
-            # Load pretrained MobileViT
-            logger.info(f"Loading {self.model_name}...")
-            model = MobileViTForImageClassification.from_pretrained(
-                self.model_name,
-                num_labels=self.num_classes,
-                ignore_mismatched_sizes=True,
-            )
+        for name, module in modules_to_replace:
+            # Create wrapper
+            wrapped_block = GatedBlockWrapper(module)
             
-            # Configure LoRA
-            lora_config = LoraConfig(
-                task_type=TaskType.FEATURE_EXTRACTION,  # Use FEATURE_EXTRACTION for ViT models
-                r=self.lora_r,
-                lora_alpha=self.lora_alpha,
-                lora_dropout=self.lora_dropout,
-                target_modules=["query", "key", "value"],  # Target attention Q, K, V
-                bias="none",
-            )
+            # Replace in parent
+            if '.' in name:
+                parent_name, child_name = name.rsplit('.', 1)
+                parent = self.model.get_submodule(parent_name)
+                setattr(parent, child_name, wrapped_block)
+            else:
+                # Handle top-level if necessary (unlikely for blocks)
+                pass
             
-            # Apply LoRA
-            model = get_peft_model(model, lora_config)
+        logger.info(f"Replaced {len(modules_to_replace)} blocks with GatedBlockWrapper")
+
+    def _freeze_backbone(self):
+        """Freeze backbone, keep expert/gate/head trainable"""
+        logger.info("Freezing backbone parameters...")
+        
+        # Freeze all first
+        for param in self.model.parameters():
+            param.requires_grad = False
             
-            # Wrap with Adaptive Model
-            from .adaptive_model import AdaptiveMobileViT
-            model = AdaptiveMobileViT(model)
+        # Unfreeze specific parts
+        for name, module in self.model.named_modules():
+            if isinstance(module, GatedBlockWrapper):
+                for param in module.expert.parameters():
+                    param.requires_grad = True
+                for param in module.gate.parameters():
+                    param.requires_grad = True
             
-            logger.info("LoRA applied and wrapped with AdaptiveMobileViT")
-            return model
-            
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            logger.warning("Falling back to mock model")
-            return self._build_mock_model()
+        # Unfreeze head
+        if hasattr(self.model, 'head'):
+            for param in self.model.head.parameters():
+                param.requires_grad = True
+        elif hasattr(self.model, 'classifier'):
+            for param in self.model.classifier.parameters():
+                param.requires_grad = True
+                
+        trainable = self._count_trainable_parameters()
+        total = self._count_parameters()
+        logger.info(f"Frozen backbone. Trainable params: {trainable}/{total} ({trainable/total:.1%})")
     
-    def _build_mock_model(self) -> nn.Module:
-        """Build a simple CNN for testing without transformers"""
-        
-        class SimpleCNN(nn.Module):
-            def __init__(self, num_classes):
-                super().__init__()
-                self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
-                self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
-                self.pool = nn.MaxPool2d(2, 2)
-                self.fc1 = nn.Linear(64 * 56 * 56, 512)
-                self.fc2 = nn.Linear(512, num_classes)
-                self.dropout = nn.Dropout(0.5)
-            
-            def forward(self, pixel_values):
-                x = pixel_values
-                x = self.pool(F.relu(self.conv1(x)))
-                x = self.pool(F.relu(self.conv2(x)))
-                x = x.view(x.size(0), -1)
-                x = F.relu(self.fc1(x))
-                x = self.dropout(x)
-                logits = self.fc2(x)
-                return {"logits": logits}
-        
-        logger.info("Created SimpleCNN mock model")
-        return SimpleCNN(self.num_classes)
+    # Mock model removed
     
     def _count_parameters(self) -> int:
         """Count total parameters"""
@@ -175,14 +176,8 @@ class MobileViTLoRATrainer:
         return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
     
     def _count_lora_parameters(self) -> int:
-        """Count LoRA-specific parameters"""
-        if HAS_TRANSFORMERS:
-            try:
-                return sum(p.numel() for n, p in self.model.named_parameters() 
-                          if 'lora' in n.lower() and p.requires_grad)
-            except:
-                pass
-        return self._count_trainable_parameters()
+        """Count LoRA-specific parameters (Deprecated)"""
+        return 0
     
     def get_parameters(self) -> List[np.ndarray]:
         """
@@ -194,16 +189,10 @@ class MobileViTLoRATrainer:
         """
         parameters = []
         
-        if HAS_TRANSFORMERS:
-            # Extract only LoRA parameters
-            for name, param in self.model.named_parameters():
-                if 'lora' in name.lower() and param.requires_grad:
-                    parameters.append(param.detach().cpu().numpy())
-        else:
-            # Extract all trainable parameters (mock model)
-            for param in self.model.parameters():
-                if param.requires_grad:
-                    parameters.append(param.detach().cpu().numpy())
+        # Extract all trainable parameters
+        for param in self.model.parameters():
+            if param.requires_grad:
+                parameters.append(param.detach().cpu().numpy())
         
         logger.debug(f"Extracted {len(parameters)} parameter arrays")
         return parameters
@@ -233,14 +222,9 @@ class MobileViTLoRATrainer:
         
         # 3. Iterate through params (Logic similar to get_parameters but with Pruning)
         # Note: Only process LoRA params or trainable params
-        if HAS_TRANSFORMERS and not self.is_mock_model:
-            # Real transformers model - only extract LoRA params
-            iterator = [(n, p) for n, p in self.model.named_parameters() 
-                       if 'lora' in n.lower() and p.requires_grad]
-        else:
-            # Mock model or no transformers - extract all trainable params
-            iterator = [(f"param_{i}", p) for i, p in enumerate(self.model.parameters()) 
-                       if p.requires_grad]
+        # 3. Iterate through params
+        iterator = [(f"param_{i}", p) for i, p in enumerate(self.model.parameters()) 
+                   if p.requires_grad]
 
         for name, param in iterator:
             # Work on a copy to avoid affecting the original model
@@ -293,24 +277,13 @@ class MobileViTLoRATrainer:
         """
         param_idx = 0
         
-        if HAS_TRANSFORMERS:
-            # Update only LoRA parameters
-            for name, param in self.model.named_parameters():
-                if 'lora' in name.lower() and param.requires_grad:
-                    if param_idx >= len(parameters):
-                        logger.error(f"Not enough parameters provided")
-                        break
-                    
-                    param.data = torch.from_numpy(parameters[param_idx]).to(self.device)
-                    param_idx += 1
-        else:
-            # Update all trainable parameters (mock model)
-            for param in self.model.parameters():
-                if param.requires_grad:
-                    if param_idx >= len(parameters):
-                        break
-                    param.data = torch.from_numpy(parameters[param_idx]).to(self.device)
-                    param_idx += 1
+        # Update all trainable parameters
+        for param in self.model.parameters():
+            if param.requires_grad:
+                if param_idx >= len(parameters):
+                    break
+                param.data = torch.from_numpy(parameters[param_idx]).to(self.device)
+                param_idx += 1
         
         logger.debug(f"Set {param_idx} parameter arrays")
     
@@ -322,7 +295,6 @@ class MobileViTLoRATrainer:
         weight_decay: float = 0.01,
         fedprox_mu: float = 0.0,       
         global_weights: List[np.ndarray] = None,
-        network_monitor: Optional[Any] = None  # <--- NEW
     ) -> Dict[str, float]:
         """
         Train the model locally.
@@ -364,15 +336,16 @@ class MobileViTLoRATrainer:
                 # Forward pass with mixed precision
                 if self.use_mixed_precision and self.scaler:
                     with torch.cuda.amp.autocast():
-                        # Get network score
+                        # Get network score from self.network_monitor
                         quality_score = 1.0
-                        if network_monitor:
-                            quality_score = network_monitor.get_network_score()
-                            if hasattr(self.model, 'set_quality_score'):
-                                self.model.set_quality_score(quality_score)
+                        if self.network_monitor:
+                            quality_score = self.network_monitor.get_network_score()
+                        
+                        # Propagate score
+                        self.model.apply(lambda m: m.set_quality_score(quality_score) if hasattr(m, 'set_quality_score') else None)
 
-                        outputs = self.model(pixel_values=images, quality_score=quality_score)
-                        logits = outputs["logits"] if isinstance(outputs, dict) else outputs
+                        outputs = self.model(images)
+                        logits = outputs
                         task_loss = F.cross_entropy(logits, labels)
                         
                         loss = task_loss
@@ -384,8 +357,16 @@ class MobileViTLoRATrainer:
                     self.scaler.step(optimizer)
                     self.scaler.update()
                 else:
-                    outputs = self.model(pixel_values=images)
-                    logits = outputs["logits"] if isinstance(outputs, dict) else outputs
+                    # Get network score from self.network_monitor
+                    quality_score = 1.0
+                    if self.network_monitor:
+                        quality_score = self.network_monitor.get_network_score()
+                    
+                    # Propagate score
+                    self.model.apply(lambda m: m.set_quality_score(quality_score) if hasattr(m, 'set_quality_score') else None)
+
+                    outputs = self.model(images)
+                    logits = outputs
                     task_loss = F.cross_entropy(logits, labels)
                     
                     loss = task_loss
@@ -447,8 +428,8 @@ class MobileViTLoRATrainer:
                 images = images.to(self.device)
                 labels = labels.to(self.device)
                 
-                outputs = self.model(pixel_values=images)
-                logits = outputs["logits"] if isinstance(outputs, dict) else outputs
+                outputs = self.model(images)
+                logits = outputs
                 loss = F.cross_entropy(logits, labels)
                 
                 predictions = logits.argmax(dim=1)
@@ -470,29 +451,33 @@ class MobileViTLoRATrainer:
         return metrics
     
     def _compute_proximal_loss(self, global_weights: List[np.ndarray], mu: float) -> torch.Tensor:
-        """Tính toán FedProx regularization term"""
+        """Compute FedProx regularization term"""
         proximal_term = 0.0
         
-        # Lấy các tham số hiện tại của model (đang train)
-        # Lưu ý: get_parameters() của bạn trả về list numpy, nhưng ở đây ta cần tensor
-        # để giữ được gradient graph. Vì vậy ta duyệt qua model.parameters() trực tiếp.
+        # Get current model parameters (training)
+        # Note: self.get_parameters() returns numpy list, but here we need tensors
+        # to keep the gradient graph. So we iterate model.parameters() directly.
         
-        # Tạo iterator cho global weights (đã flatten hoặc theo layer)
-        # Ở đây ta giả định thứ tự parameters khớp với get_parameters()
+        # Create iterator for global weights
+        # We assume the order matches get_parameters()
         
-        # 1. Chỉ lấy các tham số cần train (LoRA)
+        # 1. Get only trainable parameters (LoRA)
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         
-        # 2. Kiểm tra khớp số lượng
+        # 2. Check length mismatch
         if len(trainable_params) != len(global_weights):
-            return torch.tensor(0.0).to(self.device)
+            raise ValueError(f"Parameter length mismatch: model={len(trainable_params)}, global={len(global_weights)}")
 
-        # 3. Tính khoảng cách L2
+        # 3. Compute L2 distance
         for param, global_w in zip(trainable_params, global_weights):
-            # Chuyển global weight (numpy) sang tensor trên cùng device
+            # Check shape
+            if param.shape != global_w.shape:
+                raise ValueError(f"Shape mismatch: model={param.shape}, global={global_w.shape}")
+
+            # Convert global weight (numpy) to tensor on same device
             global_w_tensor = torch.tensor(global_w).to(self.device)
             
-            # Cộng dồn norm^2
+            # Accumulate norm^2
             proximal_term += (param - global_w_tensor).norm(2) ** 2
 
         return (mu / 2.0) * proximal_term

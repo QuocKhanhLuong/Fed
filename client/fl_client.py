@@ -6,7 +6,7 @@ Author: Research Team - FL-QUIC-LoRA Project
 """
 
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import logging
 
 try:
@@ -57,7 +57,7 @@ class FLClient(fl.client.NumPyClient if HAS_FLOWER else object):
     
     def get_parameters(self, config: Dict[str, Scalar]) -> NDArrays:
         """
-        Get model parameters (LoRA weights).
+        Get model parameters.
         
         Args:
             config: Configuration from server
@@ -65,8 +65,8 @@ class FLClient(fl.client.NumPyClient if HAS_FLOWER else object):
         Returns:
             List of NumPy arrays (model weights)
         """
-        logger.info("Extracting model parameters (Adaptive Pruning)...")
-        parameters = self.trainer.get_adaptive_parameters()
+        logger.info("Extracting model parameters...")
+        parameters = self.trainer.get_parameters()
         logger.info(f"Extracted {len(parameters)} parameter arrays")
         return parameters
     
