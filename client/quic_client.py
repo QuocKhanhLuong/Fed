@@ -31,6 +31,7 @@ from transport.quic_protocol import (
 )
 from transport.serializer import ModelSerializer
 from transport.network_monitor import NetworkMonitor
+from utils.metrics import SystemMetrics
 
 logging.basicConfig(
     level=logging.INFO,
@@ -150,6 +151,9 @@ class FLQuicClient:
             'updates_sent': 0,
             'total_samples_trained': 0,
         }
+        
+        # System metrics tracker for communication cost
+        self.system_metrics = SystemMetrics()
         
         # Message handler
         self.message_handler = FLClientHandler(self)
@@ -281,12 +285,20 @@ class FLQuicClient:
         metrics: Dict[str, float]
     ) -> None:
         """
-        Send local update to server.
+        Send local update to server with communication metrics tracking.
         CORRECT ORDER: Metadata FIRST (Stream 8), then Weights (Stream 4).
         """
         try:
             import time
             send_time = time.time()
+            
+            # Get connection stats before sending (if available)
+            bytes_sent_before = 0
+            bytes_received_before = 0
+            if self.protocol and hasattr(self.protocol, '_quic'):
+                stats_before = self.protocol._quic._loss.get_stats()  # type: ignore
+                bytes_sent_before = getattr(stats_before, 'bytes_sent', 0)
+                bytes_received_before = getattr(stats_before, 'bytes_received', 0)
             
             # 1. Send Metadata FIRST
             # This ensures the server knows WHO is sending and WHAT the status is
@@ -310,10 +322,24 @@ class FLQuicClient:
             logger.info(f"Sending weights (Stream 4): {len(weights)} arrays...")
             self.protocol.send_weights(weights)
             
-            self.stats['updates_sent'] += 1
-            logger.info("Update sent successfully")
+            # Get connection stats after sending
+            bytes_sent_after = bytes_sent_before
+            bytes_received_after = bytes_received_before
+            if self.protocol and hasattr(self.protocol, '_quic'):
+                stats_after = self.protocol._quic._loss.get_stats()  # type: ignore
+                bytes_sent_after = getattr(stats_after, 'bytes_sent', bytes_sent_before)
+                bytes_received_after = getattr(stats_after, 'bytes_received', bytes_received_before)
             
-            # Update network stats logic... (giữ nguyên)
+            # Update system metrics with deltas
+            comm_metrics = self.system_metrics.update_communication(
+                bytes_sent=bytes_sent_after,
+                bytes_received=bytes_received_after
+            )
+            
+            self.stats['updates_sent'] += 1
+            logger.info(f"Update sent successfully: "
+                       f"Sent {SystemMetrics.format_bytes(comm_metrics['bytes_sent_delta'])}, "
+                       f"Received {SystemMetrics.format_bytes(comm_metrics['bytes_received_delta'])}")
             
         except Exception as e:
             logger.error(f"Failed to send update: {e}")

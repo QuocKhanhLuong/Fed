@@ -5,126 +5,68 @@ from torch.utils.data import DataLoader, TensorDataset
 from typing import List, Tuple, Dict, Optional, Any
 import numpy as np
 import logging
-from pathlib import Path
-import copy
+import sys
+import os
+import timm
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from utils.metrics import ClassificationEvaluator, ResourceTracker
+from models.gated_mobilevit import GatedBlockWrapper
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Scikit-learn for advanced metrics
 try:
-    from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-    from sklearn.preprocessing import label_binarize
-    HAS_SKLEARN = True
+    from peft import LoraConfig, get_peft_model, PeftModel
+    HAS_PEFT = True
 except ImportError:
-    HAS_SKLEARN = False
-    logger.warning("scikit-learn not installed - advanced metrics unavailable")
+    HAS_PEFT = False
+    LoraConfig = None
+    get_peft_model = None
+    PeftModel = None
 
-try:
-    import sys
-    import os
-    import timm
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    from models.gated_mobilevit import GatedBlockWrapper
-    
-    # Try to import PEFT for LoRA
-    try:
-        from peft import LoraConfig, get_peft_model, PeftModel
-        HAS_PEFT = True
-    except ImportError:
-        HAS_PEFT = False
-        LoraConfig = None  # type: ignore
-        get_peft_model = None  # type: ignore
-        PeftModel = None  # type: ignore
-        logger.warning("peft library not installed - LoRA features disabled")
-        
-except ImportError as e:
-    logger.error(f"Failed to import dependencies: {e}")
-    raise
-
-
-# ============================================================
-# SAM Optimizer Implementation (Feature A)
-# ============================================================
 class SAM(torch.optim.Optimizer):
-    """
-    Sharpness-Aware Minimization (SAM) Optimizer
-    Paper: https://arxiv.org/abs/2010.01412
-    
-    Improves model generalization by minimizing both loss value and loss sharpness.
-    """
     def __init__(self, params, base_optimizer, rho=0.05, adaptive=False, **kwargs):
-        """
-        Args:
-            params: Model parameters
-            base_optimizer: Base optimizer class (e.g., torch.optim.AdamW)
-            rho: Neighborhood size (default: 0.05)
-            adaptive: Use adaptive SAM (default: False)
-        """
         assert rho >= 0.0, f"Invalid rho: {rho}"
-        
         defaults = dict(rho=rho, adaptive=adaptive, **kwargs)
         super(SAM, self).__init__(params, defaults)
-        
         self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
         self.param_groups = self.base_optimizer.param_groups
         self.defaults.update(self.base_optimizer.defaults)
     
     @torch.no_grad()
     def first_step(self, zero_grad=False):
-        """
-        First step: Compute gradient and climb to local maximum.
-        """
         grad_norm = self._grad_norm()
         for group in self.param_groups:
             scale = group["rho"] / (grad_norm + 1e-12)
-            
             for p in group["params"]:
-                if p.grad is None:
-                    continue
+                if p.grad is None: continue
                 self.state[p]["old_p"] = p.data.clone()
                 e_w = (torch.pow(p, 2) if group["adaptive"] else 1.0) * p.grad * scale.to(p)
-                p.add_(e_w)  # Climb to the local maximum "w + e(w)"
-        
-        if zero_grad:
-            self.zero_grad()
+                p.add_(e_w)
+        if zero_grad: self.zero_grad()
     
     @torch.no_grad()
     def second_step(self, zero_grad=False):
-        """
-        Second step: Update weights with base optimizer.
-        """
         for group in self.param_groups:
             for p in group["params"]:
-                if p.grad is None:
-                    continue
-                p.data = self.state[p]["old_p"]  # Get back to "w" from "w + e(w)"
-        
-        self.base_optimizer.step()  # Do the actual "sharpness-aware" update
-        
-        if zero_grad:
-            self.zero_grad()
+                if p.grad is None: continue
+                p.data = self.state[p]["old_p"]
+        self.base_optimizer.step()
+        if zero_grad: self.zero_grad()
     
     @torch.no_grad()
     def step(self, closure=None):
-        """
-        Standard step (not used in SAM workflow).
-        SAM requires first_step() and second_step() to be called explicitly.
-        """
-        raise NotImplementedError("SAM requires first_step() and second_step() to be called explicitly.")
+        raise NotImplementedError("SAM requires first_step() and second_step()")
     
     def _grad_norm(self):
-        """
-        Compute gradient norm for scaling.
-        """
-        shared_device = self.param_groups[0]["params"][0].device  # Put everything on the same device
+        shared_device = self.param_groups[0]["params"][0].device
         norm = torch.norm(
             torch.stack([
                 ((torch.abs(p) if group["adaptive"] else 1.0) * p.grad).norm(p=2).to(shared_device)
                 for group in self.param_groups for p in group["params"]
                 if p.grad is not None
-            ]),
-            p=2
+            ]), p=2
         )
         return norm
     
@@ -132,18 +74,7 @@ class SAM(torch.optim.Optimizer):
         super().load_state_dict(state_dict)
         self.base_optimizer.param_groups = self.param_groups
 
-
 class MobileViTLoRATrainer:
-    """
-    Trainer for MobileViT with LoRA/AdaLoRA adaptation.
-    Designed for Federated Learning on edge devices.
-    
-    Features:
-    - Feature A: Sharpness-Aware Minimization (SAM) for better generalization
-    - Feature C: Test-Time Adaptation (TTA) for handling distribution shifts
-    - Feature D: AdaLoRA for dynamic rank allocation
-    """
-    
     def __init__(
         self,
         num_classes: int = 10,
@@ -154,14 +85,11 @@ class MobileViTLoRATrainer:
         device: str = "auto",
         use_mixed_precision: bool = True,
         network_monitor: Optional[Any] = None,
-        # Feature A: SAM
         use_sam: bool = False,
         sam_rho: float = 0.05,
-        # Feature C: TTA
         use_tta: bool = False,
         tta_steps: int = 1,
         tta_lr: float = 1e-4,
-        # Feature D: LoRA parameters
         use_lora: bool = False,
     ):
         self.num_classes = num_classes
@@ -171,8 +99,6 @@ class MobileViTLoRATrainer:
         self.lora_dropout = lora_dropout
         self.use_mixed_precision = use_mixed_precision
         self.network_monitor = network_monitor
-        
-        # Feature flags
         self.use_sam = use_sam
         self.sam_rho = sam_rho
         self.use_tta = use_tta
@@ -185,8 +111,7 @@ class MobileViTLoRATrainer:
         else:
             self.device = torch.device(device)
         
-        logger.info(f"Initializing MobileViTLoRATrainer on {self.device}")
-        logger.info(f"  SAM: {use_sam}, TTA: {use_tta}, LoRA: {use_lora}")
+        logger.info(f"Trainer init: SAM={use_sam}, TTA={use_tta}, LoRA={use_lora}")
         
         self.model = self._build_model()
         self.model.to(self.device)
@@ -194,93 +119,25 @@ class MobileViTLoRATrainer:
         self._freeze_backbone()
         
         self.scaler = torch.cuda.amp.GradScaler() if use_mixed_precision and self.device.type == "cuda" else None
-        
-        self.stats = {
-            'total_params': self._count_parameters(),
-            'trainable_params': self._count_trainable_parameters(),
-        }
-        logger.info(f"Model initialized: {self.stats}")
     
     def _build_model(self) -> nn.Module:
-        """
-        Build model with optional AdaLoRA integration.
-        
-        Feature D: If use_lora=True, wraps the base model with LoRA adapter.
-        Otherwise, uses standard model (with manual gating injection later).
-        """
-        logger.info(f"Initializing MobileViTv2 (timm) for {self.num_classes} classes")
         base_model = timm.create_model('mobilevitv2_050.cvnets_in1k', pretrained=True, num_classes=self.num_classes)
         
-        # Feature D: LoRA Integration
         if self.use_lora and HAS_PEFT and LoraConfig is not None:
-            logger.info(f"Applying LoRA: r={self.lora_r}, alpha={self.lora_alpha}")
-            
-            # CRITICAL FIX: Target proper layers for effective LoRA
-            # MobileViTv2 architecture analysis:
-            # - MobileViT blocks contain transformer layers with projection operations
-            # - These projections are typically Conv2d 1x1 (pointwise convolutions)
-            # - We must target these to enable representation learning, not just classifier
-            
-            # First, let's inspect available modules to find the right targets
-            available_modules = set()
-            for name, module in base_model.named_modules():
-                # Collect all Conv2d and Linear module names
-                if isinstance(module, (nn.Linear, nn.Conv2d)):
-                    # Extract parent module name pattern
-                    parts = name.split('.')
-                    if len(parts) >= 2:
-                        available_modules.add(parts[-1])  # Last component (e.g., 'conv_1x1', 'fc')
-            
-            logger.info(f"Available target modules in MobileViTv2: {available_modules}")
-            
-            # Strategy: Target multiple layer types for effective LoRA
-            # 1. head.fc - Classifier (for Linear Probing baseline)
-            # 2. conv_1x1 - Pointwise convolutions (feature transformation)
-            # 3. conv_proj - Projection layers in MobileViT blocks
-            # 4. global_rep - Global representation layers
-            target_modules = [
-                "head.fc",      # Classifier head
-                "conv_1x1",     # 1x1 pointwise convolutions (Q/K/V projections)
-                "conv_proj",    # Projection layers
-                "global_rep",   # Global representation blocks
-            ]
-            
-            # Filter to only include modules that actually exist
-            # PEFT will automatically skip non-existent modules, but we log for transparency
-            target_modules = [m for m in target_modules if any(m in name for name in available_modules)]
-            
-            if not target_modules:
-                logger.warning("No suitable target modules found! Falling back to head.fc only")
-                target_modules = ["head.fc"]
-            
-            logger.info(f"LoRA will target: {target_modules}")
-            
-            # Configure LoRA with proper settings
-            # Note: task_type is optional and may not be needed for some PEFT versions
-            lora_config = LoraConfig(  # type: ignore
-                r=self.lora_r,  # LoRA rank
-                lora_alpha=self.lora_alpha,  # Scaling factor
+            lora_config = LoraConfig(
+                r=self.lora_r,
+                lora_alpha=self.lora_alpha,
                 lora_dropout=self.lora_dropout,
-                target_modules=target_modules,
-                bias="none",  # Don't adapt bias terms
+                target_modules=["head.fc"],
+                modules_to_save=[],
             )
-            
-            # Wrap model with PEFT
-            model = get_peft_model(base_model, lora_config)  # type: ignore
-            logger.info("✓ LoRA applied successfully to feature extraction layers")
-            model.print_trainable_parameters()  # type: ignore
-            
+            model = get_peft_model(base_model, lora_config)
             return model
-        
-        elif self.use_lora and not HAS_PEFT:
-            logger.warning("LoRA requested but peft not installed. Using standard model.")
         
         return base_model
 
     def _inject_gating(self):
-        logger.info("Injecting GatedBlockWrapper into MobileViT blocks...")
         from timm.models.mobilevit import MobileVitV2Block
-        
         modules_to_replace = []
         for name, module in self.model.named_modules():
             if isinstance(module, MobileVitV2Block):
@@ -292,27 +149,20 @@ class MobileViTLoRATrainer:
                 parent_name, child_name = name.rsplit('.', 1)
                 parent = self.model.get_submodule(parent_name)
                 setattr(parent, child_name, wrapped_block)
-            
-        logger.info(f"Replaced {len(modules_to_replace)} blocks with GatedBlockWrapper")
 
     def _freeze_backbone(self):
-        logger.info("Freezing backbone parameters...")
         for param in self.model.parameters():
             param.requires_grad = False
             
         for name, module in self.model.named_modules():
             if isinstance(module, GatedBlockWrapper):
-                for param in module.expert.parameters():
-                    param.requires_grad = True
-                for param in module.gate.parameters():
-                    param.requires_grad = True
+                for param in module.expert.parameters(): param.requires_grad = True
+                for param in module.gate.parameters(): param.requires_grad = True
             
         if hasattr(self.model, 'head'):
-            for param in self.model.head.parameters():  # type: ignore
-                param.requires_grad = True
+            for param in self.model.head.parameters(): param.requires_grad = True
         elif hasattr(self.model, 'classifier'):
-            for param in self.model.classifier.parameters():  # type: ignore
-                param.requires_grad = True
+            for param in self.model.classifier.parameters(): param.requires_grad = True
                 
     def _count_parameters(self) -> int:
         return sum(p.numel() for p in self.model.parameters())
@@ -321,40 +171,21 @@ class MobileViTLoRATrainer:
         return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
     
     def get_parameters(self) -> List[np.ndarray]:
-        """
-        Extract trainable parameters.
-        
-        Feature D: For LoRA, correctly extracts adapter weights.
-        """
         parameters = []
-        
-        # For LoRA models wrapped with PEFT
         if self.use_lora and HAS_PEFT and PeftModel is not None and isinstance(self.model, PeftModel):
-            # Extract only adapter parameters (LoRA weights)
             for name, param in self.model.named_parameters():
                 if param.requires_grad and ('lora' in name.lower() or 'adapter' in name.lower()):
                     parameters.append(param.detach().cpu().numpy())
-            logger.debug(f"Extracted {len(parameters)} LoRA adapter parameters")
         else:
-            # Standard extraction for non-AdaLoRA models
             for param in self.model.parameters():
                 if param.requires_grad:
                     parameters.append(param.detach().cpu().numpy())
-        
         return parameters
 
     def get_adaptive_parameters(self) -> List[np.ndarray]:
-        score = 1.0
-        if self.network_monitor:
-            score = self.network_monitor.get_network_score()
-        
-        if score >= 0.8:
-            keep_ratio = 1.0
-        else:
-            keep_ratio = 0.1 + (0.9 * (score / 0.8))
+        score = self.network_monitor.get_network_score() if self.network_monitor else 1.0
+        keep_ratio = 1.0 if score >= 0.8 else 0.1 + (0.9 * (score / 0.8))
             
-        logger.info(f"Network Score: {score:.2f} -> Pruning Keep Ratio: {keep_ratio:.2%}")
-
         parameters = []
         iterator = [(f"param_{i}", p) for i, p in enumerate(self.model.parameters()) if p.requires_grad]
 
@@ -372,58 +203,27 @@ class MobileViTLoRATrainer:
         return parameters
     
     def set_parameters(self, parameters: List[np.ndarray]) -> None:
-        """
-        Set trainable parameters.
-        
-        Feature D: For LoRA, correctly sets adapter weights.
-        Ensures shape compatibility before assignment.
-        """
         param_idx = 0
-        
-        # For LoRA models wrapped with PEFT
         if self.use_lora and HAS_PEFT and PeftModel is not None and isinstance(self.model, PeftModel):
             for name, param in self.model.named_parameters():
                 if param.requires_grad and ('lora' in name.lower() or 'adapter' in name.lower()):
-                    if param_idx >= len(parameters):
-                        logger.warning(f"Not enough parameters to set. Expected more than {param_idx}")
-                        break
-                    
+                    if param_idx >= len(parameters): break
                     new_param = torch.from_numpy(parameters[param_idx]).to(self.device)
-                    
-                    # Verify shape compatibility
                     if new_param.shape == param.shape:
                         param.data = new_param
-                    else:
-                        logger.warning(f"Shape mismatch for {name}: expected {param.shape}, got {new_param.shape}. Skipping.")
-                    
                     param_idx += 1
         else:
-            # Standard setting for non-AdaLoRA models
             for param in self.model.parameters():
                 if param.requires_grad:
-                    if param_idx >= len(parameters):
-                        break
+                    if param_idx >= len(parameters): break
                     param.data = torch.from_numpy(parameters[param_idx]).to(self.device)
                     param_idx += 1
-        
-        logger.debug(f"Set {param_idx} parameters")
     
     def _simulate_network_artifacts(self, images: torch.Tensor, score: float) -> torch.Tensor:
-        """
-        Simulate compression artifacts (noise/blur) based on quality score.
-        Lower score = More noise.
-        """
-        if score >= 0.9:
-            return images
-            
-        # Intensity of noise (0.0 to 0.2)
+        if score >= 0.9: return images
         noise_level = (0.9 - score) * 0.5
-        
-        # Add Gaussian Noise
         noise = torch.randn_like(images) * noise_level
-        noisy_images = images + noise
-        
-        return torch.clamp(noisy_images, 0.0, 1.0)
+        return torch.clamp(images + noise, 0.0, 1.0)
 
     def train(
         self,
@@ -434,30 +234,14 @@ class MobileViTLoRATrainer:
         fedprox_mu: float = 0.0,       
         global_weights: Optional[List[np.ndarray]] = None,
     ) -> Dict[str, float]:
-        """
-        Train the model with optional SAM optimizer.
-        
-        Feature A: If use_sam=True, uses SAM wrapper around AdamW for better generalization.
-        """
         self.model.train()
+        tracker = ResourceTracker(device=str(self.device))
+        tracker.__enter__()
         
-        # Feature A: SAM Optimizer
         if self.use_sam:
-            logger.info(f"Using SAM optimizer (rho={self.sam_rho})")
-            base_optimizer = torch.optim.AdamW
-            optimizer: Any = SAM(
-                self.model.parameters(), 
-                base_optimizer,
-                rho=self.sam_rho,
-                lr=learning_rate, 
-                weight_decay=weight_decay
-            )
+            optimizer = SAM(self.model.parameters(), torch.optim.AdamW, rho=self.sam_rho, lr=learning_rate, weight_decay=weight_decay)
         else:
-            optimizer: Any = torch.optim.AdamW(
-                self.model.parameters(), 
-                lr=learning_rate, 
-                weight_decay=weight_decay
-            )
+            optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         
         total_loss, total_correct, total_samples = 0.0, 0, 0
         
@@ -465,84 +249,56 @@ class MobileViTLoRATrainer:
             epoch_loss, epoch_correct, epoch_samples = 0.0, 0, 0
             
             for batch_idx, (images, labels) in enumerate(train_loader):
-                images = images.to(self.device)
-                labels = labels.to(self.device)
+                images, labels = images.to(self.device), labels.to(self.device)
                 
-                # --- SIMULATED GATING TRAINING ---
-                # Randomly simulate network conditions to train the Gating Mechanism
-                # 30% chance to simulate poor network during training
-                if np.random.rand() < 0.3:
-                    simulated_score = np.random.uniform(0.0, 0.8)
-                else:
-                    simulated_score = 1.0
-                
-                # Apply simulated score to model (to activate Gate)
-                self.model.apply(lambda m: m.set_quality_score(simulated_score) if hasattr(m, 'set_quality_score') else None)  # type: ignore
-                
-                # Apply artifacts to input images (so Expert learns to handle noise)
+                simulated_score = np.random.uniform(0.0, 0.8) if np.random.rand() < 0.3 else 1.0
+                self.model.apply(lambda m: m.set_quality_score(simulated_score) if hasattr(m, 'set_quality_score') else None)
                 if simulated_score < 0.9:
                     images = self._simulate_network_artifacts(images, simulated_score)
-                # ---------------------------------
 
                 optimizer.zero_grad()
                 
-                # Feature A: SAM requires two forward-backward passes
                 if self.use_sam:
-                    # First forward-backward: Compute gradient and climb to local maximum
-                    if self.use_mixed_precision and self.scaler:
-                        with torch.cuda.amp.autocast():
-                            outputs = self.model(images)
-                            loss = F.cross_entropy(outputs, labels)
-                            if fedprox_mu > 0 and global_weights:
-                                loss += self._compute_proximal_loss(global_weights, fedprox_mu)
+                    with torch.cuda.amp.autocast(enabled=self.use_mixed_precision):
+                        outputs = self.model(images)
+                        loss = F.cross_entropy(outputs, labels)
+                        if fedprox_mu > 0 and global_weights:
+                            loss += self._compute_proximal_loss(global_weights, fedprox_mu)
+                    
+                    if self.scaler:
                         self.scaler.scale(loss).backward()
                         self.scaler.unscale_(optimizer.base_optimizer)
                         optimizer.first_step(zero_grad=True)
+                    else:
+                        loss.backward()
+                        optimizer.first_step(zero_grad=True)
                         
-                        # Second forward-backward: Update at the perturbed point
-                        with torch.cuda.amp.autocast():
-                            outputs = self.model(images)
-                            loss = F.cross_entropy(outputs, labels)
-                            if fedprox_mu > 0 and global_weights:
-                                loss += self._compute_proximal_loss(global_weights, fedprox_mu)
+                    with torch.cuda.amp.autocast(enabled=self.use_mixed_precision):
+                        outputs = self.model(images)
+                        loss = F.cross_entropy(outputs, labels)
+                        if fedprox_mu > 0 and global_weights:
+                            loss += self._compute_proximal_loss(global_weights, fedprox_mu)
+                    
+                    if self.scaler:
                         self.scaler.scale(loss).backward()
                         self.scaler.step(optimizer.base_optimizer)
                         self.scaler.update()
                         optimizer.second_step(zero_grad=True)
                     else:
-                        # First forward-backward
-                        outputs = self.model(images)
-                        loss = F.cross_entropy(outputs, labels)
-                        if fedprox_mu > 0 and global_weights:
-                            loss += self._compute_proximal_loss(global_weights, fedprox_mu)
-                        loss.backward()
-                        optimizer.first_step(zero_grad=True)
-                        
-                        # Second forward-backward
-                        outputs = self.model(images)
-                        loss = F.cross_entropy(outputs, labels)
-                        if fedprox_mu > 0 and global_weights:
-                            loss += self._compute_proximal_loss(global_weights, fedprox_mu)
                         loss.backward()
                         optimizer.second_step(zero_grad=True)
-                
-                # Standard optimization (non-SAM)
                 else:
-                    if self.use_mixed_precision and self.scaler:
-                        with torch.cuda.amp.autocast():
-                            outputs = self.model(images)
-                            loss = F.cross_entropy(outputs, labels)
-                            if fedprox_mu > 0 and global_weights:
-                                loss += self._compute_proximal_loss(global_weights, fedprox_mu)
-                        
+                    with torch.cuda.amp.autocast(enabled=self.use_mixed_precision):
+                        outputs = self.model(images)
+                        loss = F.cross_entropy(outputs, labels)
+                        if fedprox_mu > 0 and global_weights:
+                            loss += self._compute_proximal_loss(global_weights, fedprox_mu)
+                    
+                    if self.scaler:
                         self.scaler.scale(loss).backward()
                         self.scaler.step(optimizer)
                         self.scaler.update()
                     else:
-                        outputs = self.model(images)
-                        loss = F.cross_entropy(outputs, labels)
-                        if fedprox_mu > 0 and global_weights:
-                            loss += self._compute_proximal_loss(global_weights, fedprox_mu)
                         loss.backward()
                         optimizer.step()
                 
@@ -553,193 +309,95 @@ class MobileViTLoRATrainer:
                     epoch_correct += correct
                     epoch_samples += images.size(0)
             
-            avg_loss = epoch_loss / epoch_samples
-            accuracy = epoch_correct / epoch_samples
-            logger.info(f"Epoch {epoch + 1}/{epochs}: Loss={avg_loss:.4f}, Acc={accuracy:.4f}")
-            
+            logger.info(f"Epoch {epoch + 1}/{epochs}: Loss={epoch_loss/epoch_samples:.4f}, Acc={epoch_correct/epoch_samples:.4f}")
             total_loss += epoch_loss
             total_correct += epoch_correct
             total_samples += epoch_samples
+        
+        tracker.__exit__(None, None, None)
+        resource_metrics = tracker.get_metrics()
         
         return {
             'loss': total_loss / total_samples,
             'accuracy': total_correct / total_samples,
             'num_samples': total_samples,
             'num_epochs': epochs,
+            'train_time_s': resource_metrics['time_s'],
+            'gpu_mem_peak_mb': resource_metrics['gpu_mem_peak_mb'],
         }
     
     def evaluate(self, test_loader: DataLoader) -> Dict[str, float]:
-        """
-        Evaluate model on test set with comprehensive metrics and SAFE Test-Time Adaptation.
-        
-        CRITICAL FIX: To prevent test data leakage, we save model state before TTA
-        and restore it after evaluation. This ensures test data does not affect
-        subsequent training rounds.
-        
-        Metrics computed:
-        - Accuracy: Overall classification accuracy
-        - F1-Score (Macro): Average F1 across all classes
-        - AUROC (One-vs-Rest): Area under ROC curve for multi-class
-        
-        Feature C: Optionally applies TTA before evaluation.
-        """
-        # STEP 1: Save original model state (CPU copy to save GPU memory)
-        # This is critical to prevent test data leakage!
         original_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
-        
         try:
-            # During evaluation, use ACTUAL network score if available
-            real_score = 1.0
-            if self.network_monitor:
-                real_score = self.network_monitor.get_network_score()
+            real_score = self.network_monitor.get_network_score() if self.network_monitor else 1.0
+            self.model.apply(lambda m: m.set_quality_score(real_score) if hasattr(m, 'set_quality_score') else None)
             
-            self.model.apply(lambda m: m.set_quality_score(real_score) if hasattr(m, 'set_quality_score') else None)  # type: ignore
-            
-            # Feature C: Test-Time Adaptation
             if self.use_tta:
-                logger.info(f"Performing Test-Time Adaptation (steps={self.tta_steps}, lr={self.tta_lr})")
                 self._test_time_adaptation(test_loader)
-        
-            # Standard evaluation with comprehensive metrics
-            self.model.eval()
-            total_loss, total_correct, total_samples = 0.0, 0, 0
             
-            # Collect predictions and labels for sklearn metrics
-            all_predictions = []
-            all_labels = []
-            all_probabilities = []
+            self.model.eval()
+            total_loss = 0.0
+            all_predictions, all_labels, all_probabilities = [], [], []
             
             with torch.no_grad():
                 for images, labels in test_loader:
-                    images = images.to(self.device)
-                    labels = labels.to(self.device)
+                    images, labels = images.to(self.device), labels.to(self.device)
                     outputs = self.model(images)
                     loss = F.cross_entropy(outputs, labels)
-                    
-                    # Get predictions and probabilities
                     probabilities = F.softmax(outputs, dim=1)
                     predictions = outputs.argmax(dim=1)
                     
-                    # Accumulate for metrics
-                    correct = (predictions == labels).sum().item()
                     total_loss += loss.item() * images.size(0)
-                    total_correct += correct
-                    total_samples += images.size(0)
-                    
-                    # Store for advanced metrics
                     all_predictions.extend(predictions.cpu().numpy())
                     all_labels.extend(labels.cpu().numpy())
                     all_probabilities.append(probabilities.cpu().numpy())
             
-            # Basic metrics
-            metrics = {
-                'loss': total_loss / total_samples,
-                'accuracy': total_correct / total_samples,
-                'num_samples': total_samples,
-            }
+            all_predictions = np.array(all_predictions)
+            all_labels = np.array(all_labels)
+            all_probabilities = np.vstack(all_probabilities) if all_probabilities else None
             
-            # Compute advanced metrics with sklearn if available
-            if HAS_SKLEARN and len(all_predictions) > 0:
-                try:
-                    all_predictions = np.array(all_predictions)
-                    all_labels = np.array(all_labels)
-                    all_probabilities = np.vstack(all_probabilities)
-                    
-                    # Get number of classes
-                    num_classes = all_probabilities.shape[1]
-                    
-                    # F1-Score (Macro)
-                    f1_macro = f1_score(all_labels, all_predictions, average='macro', zero_division=0)
-                    metrics['f1_macro'] = float(f1_macro)
-                    
-                    # AUROC (One-vs-Rest) - only if we have multiple classes and samples
-                    if num_classes > 1 and len(np.unique(all_labels)) > 1:
-                        try:
-                            # Binarize labels for multi-class AUROC
-                            labels_binarized = label_binarize(all_labels, classes=range(num_classes))
-                            
-                            # Handle case where not all classes are present in batch
-                            if labels_binarized.shape[1] == num_classes:
-                                auroc = roc_auc_score(labels_binarized, all_probabilities, 
-                                                     average='macro', multi_class='ovr')
-                                metrics['auroc'] = float(auroc)
-                            else:
-                                logger.warning("Not all classes present in evaluation batch - AUROC skipped")
-                        except ValueError as e:
-                            logger.warning(f"AUROC computation failed: {e}")
-                    
-                    logger.info(f"Evaluation (Score={real_score:.2f}, TTA={self.use_tta}): "
-                              f"Loss={metrics['loss']:.4f}, Acc={metrics['accuracy']:.4f}, "
-                              f"F1={metrics.get('f1_macro', 0):.4f}, AUROC={metrics.get('auroc', 0):.4f}")
-                except Exception as e:
-                    logger.warning(f"Advanced metrics computation failed: {e}")
-                    logger.info(f"Evaluation (Score={real_score:.2f}, TTA={self.use_tta}): "
-                              f"Loss={metrics['loss']:.4f}, Acc={metrics['accuracy']:.4f}")
-            else:
-                logger.info(f"Evaluation (Score={real_score:.2f}, TTA={self.use_tta}): "
-                          f"Loss={metrics['loss']:.4f}, Acc={metrics['accuracy']:.4f}")
+            eval_metrics = ClassificationEvaluator.compute(
+                predictions=all_predictions,
+                targets=all_labels,
+                probabilities=all_probabilities,
+                num_classes=self.num_classes,
+            )
+            eval_metrics['loss'] = total_loss / max(1, eval_metrics['num_samples'])
             
-            return metrics
+            logger.info(f"Eval (Score={real_score:.2f}): Loss={eval_metrics['loss']:.4f}, Acc={eval_metrics['accuracy']:.4f}")
+            return eval_metrics
             
         finally:
-            # STEP 2: CRITICAL - Restore original model state immediately
-            # This ensures test data does not leak into the next training round
             if self.use_tta:
                 self.model.load_state_dict(original_state)
-                logger.info("✓ Model state restored after TTA (test data leakage prevented)")
     
     def _test_time_adaptation(self, test_loader: DataLoader) -> None:
-        """
-        Feature C: Test-Time Adaptation
-        
-        Adapts BatchNorm running statistics to the test distribution.
-        This helps the model handle distribution shifts without full retraining.
-        
-        Strategy:
-        1. Set model to train mode (to update BN running stats)
-        2. Freeze all parameters except BN parameters
-        3. Run a few passes through test data
-        4. Restore model to eval mode
-        """
-        # Save original training state
         original_training = self.model.training
-        
-        # Set to train mode for BN updates
         self.model.train()
         
-        # Freeze all parameters except BN
         frozen_params = []
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 frozen_params.append((name, param))
                 param.requires_grad = False
         
-        # Unfreeze BN parameters
         for module in self.model.modules():
             if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
-                for param in module.parameters():
-                    param.requires_grad = True
+                for param in module.parameters(): param.requires_grad = True
         
-        # Create lightweight optimizer for BN parameters
         bn_params = [p for p in self.model.parameters() if p.requires_grad]
         if len(bn_params) > 0:
             optimizer = torch.optim.SGD(bn_params, lr=self.tta_lr)
-            
-            # Run TTA passes
             for step in range(self.tta_steps):
                 for images, _ in test_loader:
                     images = images.to(self.device)
                     optimizer.zero_grad()
-                    
-                    # Forward pass to update BN stats (need gradients enabled!)
                     if self.use_mixed_precision:
                         with torch.cuda.amp.autocast():
                             outputs = self.model(images)
-                            # Minimize entropy for unsupervised adaptation
                             loss = self._entropy_loss(outputs)
                     else:
                         outputs = self.model(images)
-                        # Minimize entropy for unsupervised adaptation
                         loss = self._entropy_loss(outputs)
                     
                     if self.use_mixed_precision and self.scaler:
@@ -750,33 +408,20 @@ class MobileViTLoRATrainer:
                         loss.backward()
                         optimizer.step()
         
-        # Restore original parameter states
-        for name, param in frozen_params:
-            param.requires_grad = True
-        
-        # Restore original training mode
+        for name, param in frozen_params: param.requires_grad = True
         self.model.train(original_training)
-        
-        logger.info(f"TTA completed: Updated {len(bn_params)} BN parameters")
     
     def _entropy_loss(self, logits: torch.Tensor) -> torch.Tensor:
-        """
-        Compute entropy loss for test-time adaptation.
-        Minimizing entropy encourages confident predictions.
-        """
         probs = F.softmax(logits, dim=1)
-        entropy = -(probs * torch.log(probs + 1e-10)).sum(dim=1)
-        return entropy.mean()
+        return -(probs * torch.log(probs + 1e-10)).sum(dim=1).mean()
     
     def _compute_proximal_loss(self, global_weights: List[np.ndarray], mu: float) -> torch.Tensor:
         proximal_term = torch.tensor(0.0, device=self.device)
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        if len(trainable_params) != len(global_weights): 
-            return torch.tensor(0.0, device=self.device)
+        if len(trainable_params) != len(global_weights): return torch.tensor(0.0, device=self.device)
         
         for param, global_w in zip(trainable_params, global_weights):
-            global_w_tensor = torch.tensor(global_w, device=self.device)
-            proximal_term = proximal_term + (param - global_w_tensor).norm(2) ** 2
+            proximal_term = proximal_term + (param - torch.tensor(global_w, device=self.device)).norm(2) ** 2
         return torch.tensor(mu / 2.0, device=self.device) * proximal_term
 
 def create_dummy_dataset(num_samples=100, num_classes=10, image_size=224):

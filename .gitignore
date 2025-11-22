@@ -23,11 +23,17 @@ wheels/
 .installed.cfg
 *.egg
 
-# PyTorch
+# PyTorch Models & Weights
 *.pth
 *.pt
-checkpoints/
 *.ckpt
+checkpoints/
+weights/
+best_model*
+best_weight*
+saved_models/
+model_weights/
+*.safetensors
 
 # Jupyter Notebook
 .ipynb_checkpoints

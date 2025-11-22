@@ -37,6 +37,10 @@ class FederatedConfig:
     
     # Aggregation strategy
     aggregation_strategy: str = "FedAvg"  # FedAvg, FedProx, etc.
+    
+    # Convergence tracking
+    target_accuracy: float = 0.80  # Target accuracy for convergence detection
+    convergence_patience: int = 3  # Rounds to wait for improvement before declaring convergence
 
 
 @dataclass
