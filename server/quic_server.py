@@ -400,12 +400,17 @@ class FLQuicServer:
         
         logger.info(f"Starting QUIC server on {self.host}:{self.port}...")
         
+        # Protocol factory để tránh lỗi parameter binding
+        def protocol_factory(quic_conn, *args, **kwargs):
+            # Bỏ qua mọi tham số thừa từ aioquic
+            return self._create_protocol(quic_conn)
+        
         # Start QUIC server
         await serve(
             host=self.host,
             port=self.port,
             configuration=config,
-            create_protocol=self._create_protocol,
+            create_protocol=protocol_factory,
         )
         
         self._server_started.set()
