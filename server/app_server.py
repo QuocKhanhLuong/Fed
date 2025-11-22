@@ -94,7 +94,7 @@ class FLServerApp:
             dummy_trainer = MobileViTLoRATrainer(
                 num_classes=config.model.num_classes,
                 lora_r=config.model.lora_r,
-                device="gpu",  # Server chỉ cần CPU để giữ weights
+                device="cuda",  
                 use_mixed_precision=False,
                 use_sam=False,
                 use_tta=False,
