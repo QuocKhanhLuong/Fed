@@ -176,9 +176,12 @@ class FLQuicClient:
                 configuration=config,
                 create_protocol=self._create_protocol,
             ) as client:
-                self.protocol = client
+                self.protocol = client  # type: ignore
                 
                 # Wait for handshake
+                if self.protocol is None:
+                    logger.error("Protocol not initialized")
+                    return False
                 connected = await self.protocol.wait_for_connection(timeout=10.0)
                 
                 if connected:
@@ -228,6 +231,9 @@ class FLQuicClient:
                 },
             }
             
+            if self.protocol is None:
+                logger.error("Protocol not initialized")
+                return
             self.protocol.send_metadata(metadata)
             logger.info("Sent client info to server")
             
@@ -293,6 +299,11 @@ class FLQuicClient:
                 'send_timestamp': send_time,
             }
             logger.info(f"Sending metadata (Stream 8)...")
+            
+            if self.protocol is None:
+                logger.error("Protocol not initialized")
+                raise RuntimeError("Cannot send update: protocol not initialized")
+            
             self.protocol.send_metadata(metadata)
             
             # 2. Send Weights SECOND

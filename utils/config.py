@@ -47,9 +47,9 @@ class ModelConfig:
     num_classes: int = 10
     image_size: int = 224
     
-    # LoRA settings
-    use_lora: bool = True
-    lora_r: int = 8  # Rank
+    # LoRA settings (Feature D)
+    use_lora: bool = False  # Use LoRA for parameter-efficient fine-tuning
+    lora_r: int = 8  # LoRA rank
     lora_alpha: int = 16  # Scaling factor
     lora_dropout: float = 0.1
     lora_target_modules: Optional[list] = None  # Will be set to ["qkv"] for ViT
@@ -80,6 +80,16 @@ class TrainingConfig:
     # Data
     train_split: float = 0.8
     val_split: float = 0.2
+    
+    # Advanced Training Techniques
+    # Feature A: Sharpness-Aware Minimization (SAM)
+    use_sam: bool = False  # Enable SAM optimizer for better generalization
+    sam_rho: float = 0.05  # Neighborhood size for SAM
+    
+    # Feature C: Test-Time Adaptation (TTA)
+    use_tta: bool = False  # Enable TTA during evaluation
+    tta_steps: int = 1  # Number of TTA adaptation steps
+    tta_lr: float = 1e-4  # Learning rate for TTA
 
 
 @dataclass

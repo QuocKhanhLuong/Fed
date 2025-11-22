@@ -17,7 +17,7 @@ from typing import Dict, Optional, Callable, Any, List
 from dataclasses import dataclass
 from enum import IntEnum
 
-from aioquic.asyncio import QuicConnectionProtocol
+from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import (
     QuicEvent,

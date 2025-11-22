@@ -6,15 +6,20 @@ Author: Research Team - FL-QUIC-LoRA Project
 """
 
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Union, TYPE_CHECKING
 import logging
 
+# Runtime imports first
 try:
     import flwr as fl
     from flwr.common import NDArrays, Scalar
     HAS_FLOWER = True
 except ImportError:
     HAS_FLOWER = False
+    fl = None  # type: ignore
+    # Define fallback type aliases when Flower not available
+    NDArrays = List[np.ndarray]
+    Scalar = Union[bool, bytes, float, int, str]
     logging.warning("Flower not installed - client will not work")
 
 from .model_trainer import MobileViTLoRATrainer, create_dummy_dataset
@@ -23,7 +28,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class FLClient(fl.client.NumPyClient if HAS_FLOWER else object):
+class FLClient(fl.client.NumPyClient if HAS_FLOWER else object):  # type: ignore
     """
     Federated Learning Client using Flower framework.
     Wraps MobileViTLoRATrainer for FL operations.
@@ -55,7 +60,7 @@ class FLClient(fl.client.NumPyClient if HAS_FLOWER else object):
         
         logger.info(f"FLClient initialized: epochs={local_epochs}, lr={learning_rate}")
     
-    def get_parameters(self, config: Dict[str, Scalar]) -> NDArrays:
+    def get_parameters(self, config: Dict[str, Scalar]) -> NDArrays:  # type: ignore
         """
         Get model parameters.
         
@@ -70,7 +75,7 @@ class FLClient(fl.client.NumPyClient if HAS_FLOWER else object):
         logger.info(f"Extracted {len(parameters)} parameter arrays")
         return parameters
     
-    def set_parameters(self, parameters: NDArrays) -> None:
+    def set_parameters(self, parameters: NDArrays) -> None:  # type: ignore
         """
         Set model parameters (LoRA weights).
         
@@ -83,9 +88,9 @@ class FLClient(fl.client.NumPyClient if HAS_FLOWER else object):
     
     def fit(
         self,
-        parameters: NDArrays,
-        config: Dict[str, Scalar]
-    ) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
+        parameters: NDArrays,  # type: ignore
+        config: Dict[str, Scalar]  # type: ignore
+    ) -> Tuple[NDArrays, int, Dict[str, Scalar]]:  # type: ignore
         """
         Train the model locally.
         
@@ -123,10 +128,10 @@ class FLClient(fl.client.NumPyClient if HAS_FLOWER else object):
         # Extract updated parameters (Adaptive Pruning)
         updated_parameters = self.trainer.get_adaptive_parameters()
         
-        num_samples = metrics['num_samples']
+        num_samples = int(metrics['num_samples'])
         
         # Convert metrics to Flower format
-        fl_metrics = {
+        fl_metrics: Dict[str, Scalar] = {  # type: ignore
             'loss': float(metrics['loss']),
             'accuracy': float(metrics['accuracy']),
         }
@@ -138,9 +143,9 @@ class FLClient(fl.client.NumPyClient if HAS_FLOWER else object):
     
     def evaluate(
         self,
-        parameters: NDArrays,
-        config: Dict[str, Scalar]
-    ) -> Tuple[float, int, Dict[str, Scalar]]:
+        parameters: NDArrays,  # type: ignore
+        config: Dict[str, Scalar]  # type: ignore
+    ) -> Tuple[float, int, Dict[str, Scalar]]:  # type: ignore
         """
         Evaluate the model locally.
         
@@ -162,7 +167,7 @@ class FLClient(fl.client.NumPyClient if HAS_FLOWER else object):
         loss = float(metrics['loss'])
         num_samples = int(metrics['num_samples'])
         
-        fl_metrics = {
+        fl_metrics: Dict[str, Scalar] = {  # type: ignore
             'accuracy': float(metrics['accuracy']),
         }
         
