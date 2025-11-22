@@ -91,6 +91,7 @@ class MobileViTLoRATrainer:
         tta_steps: int = 1,
         tta_lr: float = 1e-4,
         use_lora: bool = False,
+        checkpoint_dir: str = "checkpoints",
     ):
         self.num_classes = num_classes
         self.model_name = model_name
@@ -105,6 +106,11 @@ class MobileViTLoRATrainer:
         self.tta_steps = tta_steps
         self.tta_lr = tta_lr
         self.use_lora = use_lora
+        self.checkpoint_dir = checkpoint_dir
+        
+        # Best model tracking
+        self.best_accuracy = 0.0
+        self.best_loss = float('inf')
         
         if device == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -114,11 +120,14 @@ class MobileViTLoRATrainer:
         logger.info(f"Trainer init: SAM={use_sam}, TTA={use_tta}, LoRA={use_lora}")
         
         self.model = self._build_model()
-        self.model.to(self.device)
         self._inject_gating()
+        self.model.to(self.device)
         self._freeze_backbone()
         
         self.scaler = torch.cuda.amp.GradScaler() if use_mixed_precision and self.device.type == "cuda" else None
+        
+        # Create checkpoint directory if it doesn't exist
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
     
     def _build_model(self) -> nn.Module:
         base_model = timm.create_model('mobilevitv2_050.cvnets_in1k', pretrained=True, num_classes=self.num_classes)
@@ -169,6 +178,136 @@ class MobileViTLoRATrainer:
     
     def _count_trainable_parameters(self) -> int:
         return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+    
+    def save_checkpoint(
+        self,
+        filename: str = "best_model.pth",
+        epoch: Optional[int] = None,
+        optimizer: Optional[torch.optim.Optimizer] = None,
+        metrics: Optional[Dict[str, float]] = None,
+    ) -> None:
+        """
+        Lưu checkpoint của model.
+        
+        Args:
+            filename: Tên file checkpoint (mặc định: "best_model.pth")
+            epoch: Epoch hiện tại (optional)
+            optimizer: Optimizer state (optional)
+            metrics: Các metrics của model (optional)
+        """
+        checkpoint_path = os.path.join(self.checkpoint_dir, filename)
+        
+        checkpoint = {
+            'model_state_dict': self.model.state_dict(),
+            'num_classes': self.num_classes,
+            'model_name': self.model_name,
+            'use_lora': self.use_lora,
+            'best_accuracy': self.best_accuracy,
+            'best_loss': self.best_loss,
+        }
+        
+        if epoch is not None:
+            checkpoint['epoch'] = epoch
+        
+        if optimizer is not None:
+            checkpoint['optimizer_state_dict'] = optimizer.state_dict()
+        
+        if metrics is not None:
+            checkpoint['metrics'] = metrics
+        
+        # Nếu sử dụng LoRA, lưu thêm config
+        if self.use_lora and HAS_PEFT:
+            checkpoint['lora_config'] = {
+                'lora_r': self.lora_r,
+                'lora_alpha': self.lora_alpha,
+                'lora_dropout': self.lora_dropout,
+            }
+        
+        torch.save(checkpoint, checkpoint_path)
+        logger.info(f"Checkpoint saved to {checkpoint_path}")
+    
+    def load_checkpoint(
+        self,
+        filename: str = "best_model.pth",
+        load_optimizer: bool = False,
+        optimizer: Optional[torch.optim.Optimizer] = None,
+    ) -> Dict[str, Any]:
+        """
+        Load checkpoint của model.
+        
+        Args:
+            filename: Tên file checkpoint
+            load_optimizer: Có load optimizer state không
+            optimizer: Optimizer để load state vào (nếu load_optimizer=True)
+        
+        Returns:
+            Dict chứa thông tin checkpoint
+        """
+        checkpoint_path = os.path.join(self.checkpoint_dir, filename)
+        
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
+        
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        
+        # Load model state
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Restore best metrics
+        if 'best_accuracy' in checkpoint:
+            self.best_accuracy = checkpoint['best_accuracy']
+        if 'best_loss' in checkpoint:
+            self.best_loss = checkpoint['best_loss']
+        
+        # Load optimizer state nếu cần
+        if load_optimizer and optimizer is not None and 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        logger.info(f"Checkpoint loaded from {checkpoint_path}")
+        
+        return checkpoint
+    
+    def save_best_model(
+        self,
+        accuracy: float,
+        loss: float,
+        epoch: Optional[int] = None,
+        optimizer: Optional[torch.optim.Optimizer] = None,
+    ) -> bool:
+        """
+        Lưu model nếu là model tốt nhất (dựa trên accuracy).
+        
+        Args:
+            accuracy: Accuracy hiện tại
+            loss: Loss hiện tại
+            epoch: Epoch hiện tại
+            optimizer: Optimizer state
+        
+        Returns:
+            True nếu đã lưu model mới, False nếu không
+        """
+        is_best = accuracy > self.best_accuracy
+        
+        if is_best:
+            self.best_accuracy = accuracy
+            self.best_loss = loss
+            
+            metrics = {
+                'accuracy': accuracy,
+                'loss': loss,
+            }
+            
+            self.save_checkpoint(
+                filename="best_model.pth",
+                epoch=epoch,
+                optimizer=optimizer,
+                metrics=metrics,
+            )
+            
+            logger.info(f"New best model saved! Accuracy: {accuracy:.4f}, Loss: {loss:.4f}")
+            return True
+        
+        return False
     
     def get_parameters(self) -> List[np.ndarray]:
         parameters = []
@@ -233,6 +372,8 @@ class MobileViTLoRATrainer:
         weight_decay: float = 0.01,
         fedprox_mu: float = 0.0,       
         global_weights: Optional[List[np.ndarray]] = None,
+        val_loader: Optional[DataLoader] = None,
+        save_best: bool = False,
     ) -> Dict[str, float]:
         self.model.train()
         tracker = ResourceTracker(device=str(self.device))
@@ -288,7 +429,7 @@ class MobileViTLoRATrainer:
                         loss.backward()
                         optimizer.second_step(zero_grad=True)
                 else:
-                    with torch.cuda.amp.autocast(enabled=self.use_mixed_precision):
+                    with torch.amp.autocast(enabled=self.use_mixed_precision):
                         outputs = self.model(images)
                         loss = F.cross_entropy(outputs, labels)
                         if fedprox_mu > 0 and global_weights:
@@ -313,6 +454,16 @@ class MobileViTLoRATrainer:
             total_loss += epoch_loss
             total_correct += epoch_correct
             total_samples += epoch_samples
+            
+            # Evaluate and save best model if validation loader is provided
+            if save_best and val_loader is not None:
+                val_metrics = self.evaluate(val_loader)
+                self.save_best_model(
+                    accuracy=val_metrics['accuracy'],
+                    loss=val_metrics['loss'],
+                    epoch=epoch + 1,
+                    optimizer=optimizer,
+                )
         
         tracker.__exit__(None, None, None)
         resource_metrics = tracker.get_metrics()
@@ -433,6 +584,28 @@ def create_dummy_dataset(num_samples=100, num_classes=10, image_size=224):
            DataLoader(TensorDataset(test_images, test_labels), batch_size=32, shuffle=False)
 
 if __name__ == "__main__":
-    trainer = MobileViTLoRATrainer(num_classes=10, lora_r=4, use_mixed_precision=False)
+    # Ví dụ sử dụng với checkpoint
+    trainer = MobileViTLoRATrainer(
+        num_classes=10, 
+        lora_r=4, 
+        use_mixed_precision=False,
+        checkpoint_dir="checkpoints"
+    )
     train_loader, test_loader = create_dummy_dataset(num_samples=50)
-    metrics = trainer.train(train_loader, epochs=1)
+    
+    # Training với validation và auto-save best model
+    metrics = trainer.train(
+        train_loader, 
+        epochs=3,
+        val_loader=test_loader,
+        save_best=True
+    )
+    
+    print(f"Training completed. Best accuracy: {trainer.best_accuracy:.4f}")
+    
+    # Load best model
+    try:
+        checkpoint = trainer.load_checkpoint("best_model.pth")
+        print(f"Loaded best model from epoch {checkpoint.get('epoch', 'N/A')}")
+    except FileNotFoundError:
+        print("No checkpoint found")

@@ -173,12 +173,19 @@ class FLQuicClient:
             
             logger.info(f"Connecting to {self.server_host}:{self.server_port}...")
             
+            # Protocol factory to avoid parameter binding issues
+            def protocol_factory(quic_conn):
+                return FLQuicProtocol(
+                    quic_conn,
+                    stream_handler=self.message_handler.handle_message
+                )
+            
             # Establish QUIC connection
             async with connect(
                 host=self.server_host,
                 port=self.server_port,
                 configuration=config,
-                create_protocol=self._create_protocol,
+                create_protocol=protocol_factory,
             ) as client:
                 self.protocol = client  # type: ignore
                 
