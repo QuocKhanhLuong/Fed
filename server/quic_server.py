@@ -183,6 +183,9 @@ class FLQuicServer:
         from .redis_client_manager import RedisClientManager
         self.client_manager = RedisClientManager()
         
+        # Message handler
+        self.message_handler = FLServerHandler(self)
+        
         logger.info(f"FLQuicServer initialized: {host}:{port}, rounds={num_rounds}")
     
     def _create_protocol(self, quic: QuicConnection) -> FLQuicProtocol:
@@ -207,6 +210,13 @@ class FLQuicServer:
         # Get remote address
         remote_addr = quic._network_paths[0].addr if quic._network_paths else ("unknown", 0)
         
+        client_state = ClientState(
+            client_id=client_id,
+            protocol=protocol,
+            address=remote_addr
+        )
+        self.clients[client_id] = client_state
+        
         # Register client in Redis
         metadata = {
             'address': str(remote_addr),
@@ -216,7 +226,7 @@ class FLQuicServer:
         self.client_manager.register_client(client_id, metadata)
         self.stats['total_clients_connected'] += 1
         
-        logger.info(f"New client connected: {client_id} from {remote_addr}")
+        logger.info(f"New client connected: {client_id} from {remote_addr} (Total: {len(self.clients)})")
         
         return protocol
     
