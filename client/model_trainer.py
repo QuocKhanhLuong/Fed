@@ -11,6 +11,15 @@ import copy
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Scikit-learn for advanced metrics
+try:
+    from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+    from sklearn.preprocessing import label_binarize
+    HAS_SKLEARN = True
+except ImportError:
+    HAS_SKLEARN = False
+    logger.warning("scikit-learn not installed - advanced metrics unavailable")
+
 try:
     import sys
     import os
@@ -561,11 +570,16 @@ class MobileViTLoRATrainer:
     
     def evaluate(self, test_loader: DataLoader) -> Dict[str, float]:
         """
-        Evaluate model on test set with SAFE Test-Time Adaptation.
+        Evaluate model on test set with comprehensive metrics and SAFE Test-Time Adaptation.
         
         CRITICAL FIX: To prevent test data leakage, we save model state before TTA
         and restore it after evaluation. This ensures test data does not affect
         subsequent training rounds.
+        
+        Metrics computed:
+        - Accuracy: Overall classification accuracy
+        - F1-Score (Macro): Average F1 across all classes
+        - AUROC (One-vs-Rest): Area under ROC curve for multi-class
         
         Feature C: Optionally applies TTA before evaluation.
         """
@@ -586,9 +600,14 @@ class MobileViTLoRATrainer:
                 logger.info(f"Performing Test-Time Adaptation (steps={self.tta_steps}, lr={self.tta_lr})")
                 self._test_time_adaptation(test_loader)
         
-            # Standard evaluation
+            # Standard evaluation with comprehensive metrics
             self.model.eval()
             total_loss, total_correct, total_samples = 0.0, 0, 0
+            
+            # Collect predictions and labels for sklearn metrics
+            all_predictions = []
+            all_labels = []
+            all_probabilities = []
             
             with torch.no_grad():
                 for images, labels in test_loader:
@@ -596,18 +615,70 @@ class MobileViTLoRATrainer:
                     labels = labels.to(self.device)
                     outputs = self.model(images)
                     loss = F.cross_entropy(outputs, labels)
+                    
+                    # Get predictions and probabilities
+                    probabilities = F.softmax(outputs, dim=1)
                     predictions = outputs.argmax(dim=1)
+                    
+                    # Accumulate for metrics
                     correct = (predictions == labels).sum().item()
                     total_loss += loss.item() * images.size(0)
                     total_correct += correct
                     total_samples += images.size(0)
+                    
+                    # Store for advanced metrics
+                    all_predictions.extend(predictions.cpu().numpy())
+                    all_labels.extend(labels.cpu().numpy())
+                    all_probabilities.append(probabilities.cpu().numpy())
             
+            # Basic metrics
             metrics = {
                 'loss': total_loss / total_samples,
                 'accuracy': total_correct / total_samples,
                 'num_samples': total_samples,
             }
-            logger.info(f"Evaluation (Score={real_score:.2f}, TTA={self.use_tta}): Loss={metrics['loss']:.4f}, Acc={metrics['accuracy']:.4f}")
+            
+            # Compute advanced metrics with sklearn if available
+            if HAS_SKLEARN and len(all_predictions) > 0:
+                try:
+                    all_predictions = np.array(all_predictions)
+                    all_labels = np.array(all_labels)
+                    all_probabilities = np.vstack(all_probabilities)
+                    
+                    # Get number of classes
+                    num_classes = all_probabilities.shape[1]
+                    
+                    # F1-Score (Macro)
+                    f1_macro = f1_score(all_labels, all_predictions, average='macro', zero_division=0)
+                    metrics['f1_macro'] = float(f1_macro)
+                    
+                    # AUROC (One-vs-Rest) - only if we have multiple classes and samples
+                    if num_classes > 1 and len(np.unique(all_labels)) > 1:
+                        try:
+                            # Binarize labels for multi-class AUROC
+                            labels_binarized = label_binarize(all_labels, classes=range(num_classes))
+                            
+                            # Handle case where not all classes are present in batch
+                            if labels_binarized.shape[1] == num_classes:
+                                auroc = roc_auc_score(labels_binarized, all_probabilities, 
+                                                     average='macro', multi_class='ovr')
+                                metrics['auroc'] = float(auroc)
+                            else:
+                                logger.warning("Not all classes present in evaluation batch - AUROC skipped")
+                        except ValueError as e:
+                            logger.warning(f"AUROC computation failed: {e}")
+                    
+                    logger.info(f"Evaluation (Score={real_score:.2f}, TTA={self.use_tta}): "
+                              f"Loss={metrics['loss']:.4f}, Acc={metrics['accuracy']:.4f}, "
+                              f"F1={metrics.get('f1_macro', 0):.4f}, AUROC={metrics.get('auroc', 0):.4f}")
+                except Exception as e:
+                    logger.warning(f"Advanced metrics computation failed: {e}")
+                    logger.info(f"Evaluation (Score={real_score:.2f}, TTA={self.use_tta}): "
+                              f"Loss={metrics['loss']:.4f}, Acc={metrics['accuracy']:.4f}")
+            else:
+                logger.info(f"Evaluation (Score={real_score:.2f}, TTA={self.use_tta}): "
+                          f"Loss={metrics['loss']:.4f}, Acc={metrics['accuracy']:.4f}")
+            
             return metrics
             
         finally:

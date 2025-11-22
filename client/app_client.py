@@ -22,6 +22,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from client.quic_client import FLQuicClient
 from client.fl_client import create_fl_client
 from client.model_trainer import MobileViTLoRATrainer
+from client.data_manager import load_dataset
 from utils.config import Config, get_jetson_config
 from transport.serializer import ModelSerializer
 
@@ -64,15 +65,49 @@ class FLClientApp:
         logger.info("Creating NetworkMonitor...")
         self.network_monitor = NetworkMonitor(window_size=20)
         
-        # Create Flower client with NetworkMonitor
+        # Load real dataset based on configuration
+        logger.info(f"Loading dataset: {config.training.dataset_name}")
+        try:
+            train_loader, val_loader, test_loader, dataset_stats = load_dataset(
+                dataset_name=config.training.dataset_name,
+                data_dir=config.training.data_dir,
+                client_id=int(client_id.split('_')[-1]) if '_' in client_id else 0,
+                num_clients=config.federated.min_available_clients,
+                partition_type="dirichlet",
+                alpha=config.training.partition_alpha,
+                batch_size=config.training.batch_size,
+                num_workers=config.training.num_workers,
+                train_split=config.training.train_split,
+            )
+            
+            # Dynamically update num_classes based on dataset
+            config.model.num_classes = dataset_stats['num_classes']
+            logger.info(f"✓ Dataset loaded: {dataset_stats['num_classes']} classes, "
+                       f"{dataset_stats['train_samples']} train samples")
+            
+        except Exception as e:
+            logger.error(f"Failed to load dataset '{config.training.dataset_name}': {e}")
+            logger.warning("Falling back to dummy data for testing")
+            from client.model_trainer import create_dummy_dataset
+            train_loader, test_loader = create_dummy_dataset(
+                num_samples=100,
+                num_classes=config.model.num_classes
+            )
+            val_loader = None
+        
+        # Create Flower client with real data
         logger.info("Creating Flower client...")
         self.fl_client = create_fl_client(
             num_classes=config.model.num_classes,
             lora_r=config.model.lora_r,
             local_epochs=config.training.local_epochs,
             learning_rate=config.training.learning_rate,
-            use_dummy_data=True,  # TODO: Load real dataset
-            network_monitor=self.network_monitor,  # Pass NetworkMonitor
+            train_loader=train_loader,
+            val_loader=val_loader,
+            test_loader=test_loader,
+            network_monitor=self.network_monitor,
+            use_sam=config.training.use_sam,
+            use_tta=config.training.use_tta,
         )
         
         # Create async training function for QUIC client
@@ -147,6 +182,28 @@ async def main():
         default=3,
         help="Local training epochs per round"
     )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="cifar100",
+        help="Dataset name (cifar10, cifar100, pathmnist, etc.)"
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.5,
+        help="Dirichlet concentration parameter (lower = more skew)"
+    )
+    parser.add_argument(
+        "--use-sam",
+        action="store_true",
+        help="Enable Sharpness-Aware Minimization"
+    )
+    parser.add_argument(
+        "--use-tta",
+        action="store_true",
+        help="Enable Test-Time Adaptation"
+    )
     
     args = parser.parse_args()
     
@@ -166,6 +223,10 @@ async def main():
     # Override config from args
     config.model.lora_r = args.lora_rank
     config.training.local_epochs = args.local_epochs
+    config.training.dataset_name = args.dataset
+    config.training.partition_alpha = args.alpha
+    config.training.use_sam = args.use_sam
+    config.training.use_tta = args.use_tta
     
     # Create and run app
     app = FLClientApp(

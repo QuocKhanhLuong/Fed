@@ -81,6 +81,11 @@ class TrainingConfig:
     train_split: float = 0.8
     val_split: float = 0.2
     
+    # Dataset Configuration
+    dataset_name: str = "cifar100"  # cifar10, cifar100, pathmnist, etc.
+    data_dir: str = "./data"  # Directory to store datasets
+    partition_alpha: float = 0.5  # Dirichlet concentration parameter (lower = more skew)
+    
     # Advanced Training Techniques
     # Feature A: Sharpness-Aware Minimization (SAM)
     use_sam: bool = False  # Enable SAM optimizer for better generalization

@@ -22,6 +22,12 @@ except ImportError:
     Scalar = Union[bool, bytes, float, int, str]
     logging.warning("Flower not installed - client will not work")
 
+# PyTorch imports
+try:
+    from torch.utils.data import DataLoader
+except ImportError:
+    DataLoader = Any  # type: ignore
+
 from .model_trainer import MobileViTLoRATrainer, create_dummy_dataset
 
 logging.basicConfig(level=logging.INFO)
@@ -181,19 +187,27 @@ def create_fl_client(
     lora_r: int = 8,
     local_epochs: int = 3,
     learning_rate: float = 1e-3,
-    use_dummy_data: bool = True,
-    network_monitor: Optional[Any] = None,  # <--- NEW
+    train_loader: Optional[DataLoader] = None,
+    val_loader: Optional[DataLoader] = None,
+    test_loader: Optional[DataLoader] = None,
+    network_monitor: Optional[Any] = None,
+    use_sam: bool = False,
+    use_tta: bool = False,
 ) -> FLClient:
     """
-    Factory function to create FL client.
+    Factory function to create FL client with real datasets.
     
     Args:
         num_classes: Number of output classes
         lora_r: LoRA rank
         local_epochs: Epochs per round
         learning_rate: Learning rate
-        use_dummy_data: Use dummy dataset (for testing)
+        train_loader: Training data loader (REQUIRED)
+        val_loader: Validation data loader (optional, uses train if None)
+        test_loader: Test data loader (optional, uses val if None)
         network_monitor: NetworkMonitor instance
+        use_sam: Enable SAM optimizer
+        use_tta: Enable Test-Time Adaptation
         
     Returns:
         FLClient instance
@@ -205,27 +219,40 @@ def create_fl_client(
         lora_r=lora_r,
         lora_alpha=lora_r * 2,
         use_mixed_precision=True,
-        network_monitor=network_monitor,  # <--- Pass network_monitor
+        network_monitor=network_monitor,
+        use_sam=use_sam,
+        use_tta=use_tta,
     )
     
-    # Create data loaders
-    if use_dummy_data:
-        logger.info("Creating dummy dataset...")
-        train_loader, test_loader = create_dummy_dataset(num_samples=100)
+    # Use provided loaders or create dummy data as fallback
+    if train_loader is None:
+        logger.warning("No train_loader provided - creating dummy dataset for testing")
+        train_loader, dummy_test = create_dummy_dataset(num_samples=100, num_classes=num_classes)
+        if test_loader is None:
+            test_loader = dummy_test
+    
+    # Use val_loader for evaluation if provided, otherwise use train_loader
+    if val_loader is None:
+        logger.info("No val_loader provided - using train_loader for local evaluation")
+        eval_loader = train_loader
     else:
-        # TODO: Load real dataset (CIFAR-10, ImageNet, etc.)
-        raise NotImplementedError("Real dataset loading not implemented yet")
+        eval_loader = val_loader
+    
+    # Use test_loader if provided, otherwise use eval_loader
+    if test_loader is None:
+        logger.info("No test_loader provided - using val_loader for testing")
+        test_loader = eval_loader
     
     # Create FL client
     client = FLClient(
         trainer=trainer,
         train_loader=train_loader,
-        test_loader=test_loader,
+        test_loader=test_loader,  # Use test_loader for global evaluation
         local_epochs=local_epochs,
         learning_rate=learning_rate,
     )
     
-    logger.info("FL Client created successfully")
+    logger.info(f"FL Client created: {num_classes} classes, LoRA-r={lora_r}, SAM={use_sam}, TTA={use_tta}")
     return client
 
 
@@ -239,12 +266,17 @@ if __name__ == "__main__":
     logger.info("Flower Client Demo")
     logger.info("="*60)
     
+    # Create dummy data for demo
+    from .model_trainer import create_dummy_dataset
+    train_loader, test_loader = create_dummy_dataset(num_samples=100, num_classes=10)
+    
     # Create client
     client = create_fl_client(
         num_classes=10,
         lora_r=4,
         local_epochs=2,
-        use_dummy_data=True,
+        train_loader=train_loader,
+        test_loader=test_loader,
     )
     
     # Simulate FL round
