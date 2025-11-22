@@ -23,6 +23,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from server.quic_server import FLQuicServer
 from server.fl_strategy import create_strategy
 from utils.config import Config, get_server_config
+from client.model_trainer import MobileViTLoRATrainer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -85,6 +86,28 @@ class FLServerApp:
             min_clients=min_clients,
             min_available_clients=min_clients,
         )
+        
+        # FIX DEADLOCK: Khởi tạo global model để gửi cho clients ngay round 1
+        logger.info("Initializing Global Model (MobileViT + LoRA)...")
+        try:
+            # Tạo model tạm để lấy trọng số khởi tạo (pretrained từ timm)
+            dummy_trainer = MobileViTLoRATrainer(
+                num_classes=config.model.num_classes,
+                lora_r=config.model.lora_r,
+                device="gpu",  # Server chỉ cần CPU để giữ weights
+                use_mixed_precision=False,
+                use_sam=False,
+                use_tta=False,
+                use_lora=config.model.use_lora,
+            )
+            
+            # Trích xuất weights và gán vào server
+            self.quic_server.global_weights = dummy_trainer.get_parameters()
+            logger.info(f"✓ Global model initialized: {len(self.quic_server.global_weights)} parameter arrays ready")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize global model: {e}")
+            raise e
         
         logger.info("FL Server App initialized")
     
