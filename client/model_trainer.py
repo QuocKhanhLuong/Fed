@@ -206,21 +206,59 @@ class MobileViTLoRATrainer:
         if self.use_lora and HAS_PEFT and LoraConfig is not None:
             logger.info(f"Applying LoRA: r={self.lora_r}, alpha={self.lora_alpha}")
             
-            # Configure LoRA
-            # Note: LoRA only supports Linear layers, not Conv2d
-            # MobileViTv2 uses mostly Conv2d layers with only head.fc as Linear
-            # We target the classifier head which is the main trainable component
+            # CRITICAL FIX: Target proper layers for effective LoRA
+            # MobileViTv2 architecture analysis:
+            # - MobileViT blocks contain transformer layers with projection operations
+            # - These projections are typically Conv2d 1x1 (pointwise convolutions)
+            # - We must target these to enable representation learning, not just classifier
+            
+            # First, let's inspect available modules to find the right targets
+            available_modules = set()
+            for name, module in base_model.named_modules():
+                # Collect all Conv2d and Linear module names
+                if isinstance(module, (nn.Linear, nn.Conv2d)):
+                    # Extract parent module name pattern
+                    parts = name.split('.')
+                    if len(parts) >= 2:
+                        available_modules.add(parts[-1])  # Last component (e.g., 'conv_1x1', 'fc')
+            
+            logger.info(f"Available target modules in MobileViTv2: {available_modules}")
+            
+            # Strategy: Target multiple layer types for effective LoRA
+            # 1. head.fc - Classifier (for Linear Probing baseline)
+            # 2. conv_1x1 - Pointwise convolutions (feature transformation)
+            # 3. conv_proj - Projection layers in MobileViT blocks
+            # 4. global_rep - Global representation layers
+            target_modules = [
+                "head.fc",      # Classifier head
+                "conv_1x1",     # 1x1 pointwise convolutions (Q/K/V projections)
+                "conv_proj",    # Projection layers
+                "global_rep",   # Global representation blocks
+            ]
+            
+            # Filter to only include modules that actually exist
+            # PEFT will automatically skip non-existent modules, but we log for transparency
+            target_modules = [m for m in target_modules if any(m in name for name in available_modules)]
+            
+            if not target_modules:
+                logger.warning("No suitable target modules found! Falling back to head.fc only")
+                target_modules = ["head.fc"]
+            
+            logger.info(f"LoRA will target: {target_modules}")
+            
+            # Configure LoRA with proper settings
+            # Note: task_type is optional and may not be needed for some PEFT versions
             lora_config = LoraConfig(  # type: ignore
                 r=self.lora_r,  # LoRA rank
-                lora_alpha=self.lora_alpha,
+                lora_alpha=self.lora_alpha,  # Scaling factor
                 lora_dropout=self.lora_dropout,
-                target_modules=["head.fc"],  # Only Linear layer in MobileViTv2
-                modules_to_save=[],  # head.fc is already targeted
+                target_modules=target_modules,
+                bias="none",  # Don't adapt bias terms
             )
             
             # Wrap model with PEFT
             model = get_peft_model(base_model, lora_config)  # type: ignore
-            logger.info("LoRA applied successfully (Note: MobileViTv2 has limited Linear layers)")
+            logger.info("✓ LoRA applied successfully to feature extraction layers")
             model.print_trainable_parameters()  # type: ignore
             
             return model
@@ -523,46 +561,61 @@ class MobileViTLoRATrainer:
     
     def evaluate(self, test_loader: DataLoader) -> Dict[str, float]:
         """
-        Evaluate the model with optional Test-Time Adaptation.
+        Evaluate model on test set with SAFE Test-Time Adaptation.
         
-        Feature C: If use_tta=True, adapts BatchNorm statistics during inference
-        to handle distribution shifts between training and test data.
+        CRITICAL FIX: To prevent test data leakage, we save model state before TTA
+        and restore it after evaluation. This ensures test data does not affect
+        subsequent training rounds.
+        
+        Feature C: Optionally applies TTA before evaluation.
         """
-        # During evaluation, use ACTUAL network score if available
-        real_score = 1.0
-        if self.network_monitor:
-            real_score = self.network_monitor.get_network_score()
+        # STEP 1: Save original model state (CPU copy to save GPU memory)
+        # This is critical to prevent test data leakage!
+        original_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
         
-        self.model.apply(lambda m: m.set_quality_score(real_score) if hasattr(m, 'set_quality_score') else None)  # type: ignore
+        try:
+            # During evaluation, use ACTUAL network score if available
+            real_score = 1.0
+            if self.network_monitor:
+                real_score = self.network_monitor.get_network_score()
+            
+            self.model.apply(lambda m: m.set_quality_score(real_score) if hasattr(m, 'set_quality_score') else None)  # type: ignore
+            
+            # Feature C: Test-Time Adaptation
+            if self.use_tta:
+                logger.info(f"Performing Test-Time Adaptation (steps={self.tta_steps}, lr={self.tta_lr})")
+                self._test_time_adaptation(test_loader)
         
-        # Feature C: Test-Time Adaptation
-        if self.use_tta:
-            logger.info(f"Performing Test-Time Adaptation (steps={self.tta_steps}, lr={self.tta_lr})")
-            self._test_time_adaptation(test_loader)
-        
-        # Standard evaluation
-        self.model.eval()
-        total_loss, total_correct, total_samples = 0.0, 0, 0
-        
-        with torch.no_grad():
-            for images, labels in test_loader:
-                images = images.to(self.device)
-                labels = labels.to(self.device)
-                outputs = self.model(images)
-                loss = F.cross_entropy(outputs, labels)
-                predictions = outputs.argmax(dim=1)
-                correct = (predictions == labels).sum().item()
-                total_loss += loss.item() * images.size(0)
-                total_correct += correct
-                total_samples += images.size(0)
-        
-        metrics = {
-            'loss': total_loss / total_samples,
-            'accuracy': total_correct / total_samples,
-            'num_samples': total_samples,
-        }
-        logger.info(f"Evaluation (Score={real_score:.2f}, TTA={self.use_tta}): Loss={metrics['loss']:.4f}, Acc={metrics['accuracy']:.4f}")
-        return metrics
+            # Standard evaluation
+            self.model.eval()
+            total_loss, total_correct, total_samples = 0.0, 0, 0
+            
+            with torch.no_grad():
+                for images, labels in test_loader:
+                    images = images.to(self.device)
+                    labels = labels.to(self.device)
+                    outputs = self.model(images)
+                    loss = F.cross_entropy(outputs, labels)
+                    predictions = outputs.argmax(dim=1)
+                    correct = (predictions == labels).sum().item()
+                    total_loss += loss.item() * images.size(0)
+                    total_correct += correct
+                    total_samples += images.size(0)
+            
+            metrics = {
+                'loss': total_loss / total_samples,
+                'accuracy': total_correct / total_samples,
+                'num_samples': total_samples,
+            }
+            logger.info(f"Evaluation (Score={real_score:.2f}, TTA={self.use_tta}): Loss={metrics['loss']:.4f}, Acc={metrics['accuracy']:.4f}")
+            return metrics
+            
+        finally:
+            # STEP 2: CRITICAL - Restore original model state immediately
+            # This ensures test data does not leak into the next training round
+            if self.use_tta:
+                self.model.load_state_dict(original_state)
+                logger.info("✓ Model state restored after TTA (test data leakage prevented)")
     
     def _test_time_adaptation(self, test_loader: DataLoader) -> None:
         """
