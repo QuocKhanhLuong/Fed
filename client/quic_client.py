@@ -15,7 +15,7 @@ import logging
 from typing import List, Optional, Callable, Any, Dict
 from pathlib import Path
 import numpy as np
-
+from functools import partial
 from aioquic.asyncio.client import connect
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.events import QuicEvent
@@ -163,9 +163,6 @@ class FLQuicClient:
     async def connect(self) -> bool:
         """
         Connect to FL server via QUIC.
-        
-        Returns:
-            True if connected successfully
         """
         try:
             # Create QUIC configuration
@@ -173,26 +170,23 @@ class FLQuicClient:
             
             logger.info(f"Connecting to {self.server_host}:{self.server_port}...")
             
-            # Protocol factory to avoid parameter binding issues
-            def protocol_factory(quic_conn):
-                return FLQuicProtocol(
-                    quic_conn,
-                    stream_handler=self.message_handler.handle_message
-                )
-            
             # Establish QUIC connection
+            # Fix: Use functools.partial to bind stream_handler to FLQuicProtocol constructor
+            # aioquic will call this partial function with just the 'quic' argument
             async with connect(
                 host=self.server_host,
                 port=self.server_port,
                 configuration=config,
-                create_protocol=protocol_factory,
+                create_protocol=partial(FLQuicProtocol, stream_handler=self.message_handler.handle_message),
             ) as client:
-                self.protocol = client  # type: ignore
+                self.protocol = client
                 
                 # Wait for handshake
                 if self.protocol is None:
                     logger.error("Protocol not initialized")
                     return False
+                
+                # ... (phần còn lại giữ nguyên) ...
                 connected = await self.protocol.wait_for_connection(timeout=10.0)
                 
                 if connected:
