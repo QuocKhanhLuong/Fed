@@ -208,3 +208,24 @@ def get_server_config() -> Config:
     config.model.lora_alpha = 32
     
     return config
+
+
+def get_rtx4070_config() -> Config:
+    """Get optimized configuration for RTX 4070 (12GB VRAM)"""
+    config = Config()
+    
+    # Memory optimized for 12GB VRAM
+    config.training.batch_size = 64
+    config.training.mixed_precision = True
+    config.training.num_workers = 4
+    
+    # FL settings
+    config.federated.min_clients = 3
+    config.federated.num_rounds = 50
+    config.federated.aggregation_strategy = "FedDyn"
+    
+    # Compression
+    config.compression.compression_level = 9
+    config.compression.enable_quantization = True
+    
+    return config

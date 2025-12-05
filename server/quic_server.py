@@ -34,6 +34,7 @@ from transport.quic_protocol import (
     StreamType
 )
 from transport.serializer import ModelSerializer
+from server.feddyn_aggregator import FedDynAggregator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -183,10 +184,13 @@ class FLQuicServer:
         from .redis_client_manager import RedisClientManager
         self.client_manager = RedisClientManager()
         
+        # FedDyn Aggregator (replaces FedAvg)
+        self.aggregator = FedDynAggregator(alpha=0.01)
+        
         # Message handler
         self.message_handler = FLServerHandler(self)
         
-        logger.info(f"FLQuicServer initialized: {host}:{port}, rounds={num_rounds}")
+        logger.info(f\"FLQuicServer initialized: {host}:{port}, rounds={num_rounds}, strategy=FedDyn\")
     
     def _create_protocol(self, quic: QuicConnection) -> FLQuicProtocol:
         """
@@ -274,7 +278,7 @@ class FLQuicServer:
     
     def _aggregate_weights(self) -> List[np.ndarray]:
         """
-        Aggregate client weights using FedAvg (weighted average).
+        Aggregate client weights using FedDyn.
         
         Returns:
             Aggregated global weights
@@ -282,35 +286,15 @@ class FLQuicServer:
         if not self.client_updates:
             raise ValueError("No client updates to aggregate")
         
-        logger.info(f"Aggregating {len(self.client_updates)} client updates...")
+        logger.info(f"FedDyn aggregating {len(self.client_updates)} client updates...")
         
-        # Extract weights and sample counts
-        client_weights = []
-        client_samples = []
+        # Use FedDyn aggregator
+        aggregated = self.aggregator.aggregate(
+            self.client_updates,
+            self.global_weights
+        )
         
-        for client_id, (weights, num_samples) in self.client_updates.items():
-            client_weights.append(weights)
-            client_samples.append(num_samples)
-        
-        # Calculate total samples
-        total_samples = sum(client_samples)
-        
-        # Weighted average (FedAvg)
-        aggregated = []
-        num_layers = len(client_weights[0])
-        
-        for layer_idx in range(num_layers):
-            # Stack all client weights for this layer
-            layer_weights = [client[layer_idx] for client in client_weights]
-            
-            # Weighted sum
-            weighted_sum = np.zeros_like(layer_weights[0], dtype=np.float32)
-            for weight, num_samples in zip(layer_weights, client_samples):
-                weighted_sum += weight * (num_samples / total_samples)
-            
-            aggregated.append(weighted_sum)
-        
-        logger.info(f"Aggregation complete: {num_layers} layers aggregated")
+        logger.info(f"FedDyn aggregation complete: {len(aggregated)} layers")
         return aggregated
     
     async def _broadcast_global_model(self, weights: List[np.ndarray]) -> None:
