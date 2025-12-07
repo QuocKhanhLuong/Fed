@@ -36,7 +36,7 @@ from transport.quic_protocol import (
 )
 from transport.serializer import ModelSerializer
 from transport.quic_metrics import QUICMetrics
-from server.feddyn_aggregator import FedDynAggregator
+from server.aggregators import create_aggregator, BaseAggregator
 from server.checkpoint_manager import CheckpointManager
 from evaluation import FLEvaluator, ExperimentConfig
 
@@ -142,6 +142,7 @@ class FLQuicServer:
         num_rounds: int = 10,
         min_clients: int = 2,
         min_available_clients: int = 2,
+        strategy: str = "feddyn",
     ):
         """
         Initialize FL server.
@@ -188,8 +189,9 @@ class FLQuicServer:
         from .redis_client_manager import RedisClientManager
         self.client_manager = RedisClientManager()
         
-        # FedDyn Aggregator (replaces FedAvg)
-        self.aggregator = FedDynAggregator(alpha=0.01)
+        # Aggregation Strategy (FedAvg, FedProx, or FedDyn)
+        self.strategy = strategy
+        self.aggregator = create_aggregator(strategy, alpha=0.01, mu=0.01)
         
         # Checkpoint Manager
         self.checkpoint_manager = CheckpointManager(
