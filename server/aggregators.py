@@ -287,6 +287,107 @@ class FedDynAggregator(BaseAggregator):
 
 
 # =============================================================================
+# NestedFedDyn - For Nested Learning (only aggregates slow weights)
+# =============================================================================
+
+class NestedFedDynAggregator(BaseAggregator):
+    """
+    Nested FedDyn Aggregator for Multi-timescale Federated Learning.
+    
+    Key Innovation: Only aggregates SLOW weights (backbone), 
+    keeps FAST weights (exits) local for personalization.
+    
+    This is designed to work with NestedEarlyExitTrainer which separates:
+    - Fast Weights: Exit classifiers (stay local, personalized)
+    - Slow Weights: Backbone stages (aggregated globally)
+    
+    Algorithm:
+        Client sends: (slow_weights, num_samples)
+        Server aggregates: Only slow_weights using FedDyn
+        Client keeps: Local fast_weights unchanged
+        
+    Benefits:
+    - Reduces communication (only backbone transmitted)
+    - Personalized exits for each client
+    - Global backbone learns shared representations
+    - Addresses catastrophic forgetting in FL
+    
+    Reference: 
+    - Nested Learning (Google Research, NeurIPS 2025)
+    - FedDyn (Acar et al., ICLR 2021)
+    """
+    
+    def __init__(self, alpha: float = 0.01):
+        """
+        Args:
+            alpha: Regularization strength (0.01 recommended)
+        """
+        super().__init__("NestedFedDyn")
+        self.alpha = alpha
+        self.h: Optional[List[np.ndarray]] = None
+        logger.info(f"NestedFedDynAggregator initialized: α={alpha}")
+        logger.info("  → Only aggregates SLOW weights (backbone)")
+        logger.info("  → FAST weights (exits) remain local for personalization")
+    
+    def aggregate(
+        self,
+        client_updates: Dict[str, Tuple[List[np.ndarray], int]],
+        global_weights: Optional[List[np.ndarray]] = None,
+    ) -> List[np.ndarray]:
+        """
+        Aggregate only slow (backbone) weights using FedDyn.
+        
+        Args:
+            client_updates: {client_id: (slow_weights_only, num_samples)}
+            global_weights: Current global slow weights
+            
+        Returns:
+            Aggregated slow weights
+        """
+        if not client_updates:
+            raise ValueError("No client updates to aggregate")
+        
+        # Weighted average
+        total_samples = sum(num for _, num in client_updates.values())
+        first_weights = list(client_updates.values())[0][0]
+        num_layers = len(first_weights)
+        aggregated = [np.zeros_like(w) for w in first_weights]
+        
+        for client_id, (weights, num_samples) in client_updates.items():
+            weight = num_samples / total_samples
+            for i in range(num_layers):
+                aggregated[i] += weight * weights[i]
+        
+        # Initialize h if needed
+        if self.h is None:
+            self.h = [np.zeros_like(w) for w in aggregated]
+        
+        # Apply gradient correction
+        if global_weights is not None:
+            corrected = []
+            for i in range(num_layers):
+                corrected_w = aggregated[i] - (1.0 / self.alpha) * self.h[i]
+                corrected.append(corrected_w)
+            
+            # Update h
+            for i in range(num_layers):
+                self.h[i] = self.h[i] - self.alpha * (corrected[i] - global_weights[i])
+            
+            aggregated = corrected
+        
+        logger.info(f"NestedFedDyn: Aggregated {len(client_updates)} clients "
+                   f"(slow weights only, α={self.alpha})")
+        
+        self.on_round_end()
+        return aggregated
+    
+    def reset(self):
+        """Reset gradient correction term."""
+        self.h = None
+        self.round_num = 0
+
+
+# =============================================================================
 # Factory Function
 # =============================================================================
 
@@ -298,7 +399,7 @@ def create_aggregator(
     Factory function to create aggregator.
     
     Args:
-        strategy: "fedavg", "fedprox", or "feddyn"
+        strategy: "fedavg", "fedprox", "feddyn", or "nested_feddyn"
         **kwargs: Strategy-specific parameters
         
     Returns:
@@ -314,9 +415,12 @@ def create_aggregator(
     elif strategy == "feddyn":
         alpha = kwargs.get("alpha", 0.01)
         return FedDynAggregator(alpha=alpha)
+    elif strategy == "nested_feddyn":
+        alpha = kwargs.get("alpha", 0.01)
+        return NestedFedDynAggregator(alpha=alpha)
     else:
         raise ValueError(f"Unknown strategy: {strategy}. "
-                        f"Choose from: fedavg, fedprox, feddyn")
+                        f"Choose from: fedavg, fedprox, feddyn, nested_feddyn")
 
 
 # =============================================================================
