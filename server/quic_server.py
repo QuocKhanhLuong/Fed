@@ -220,7 +220,7 @@ class FLQuicServer:
         # Message handler
         self.message_handler = FLServerHandler(self)
         
-        logger.info(f"FLQuicServer initialized: {host}:{port}, rounds={num_rounds}, strategy=FedDyn")
+        logger.info(f"FLQuicServer initialized: {host}:{port}, rounds={num_rounds}, strategy={strategy}")
     
     def _create_protocol(self, quic: QuicConnection) -> FLQuicProtocol:
         """

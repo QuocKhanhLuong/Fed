@@ -406,7 +406,7 @@ class NestedEarlyExitTrainer:
                 # ═══════════════════════════════════════════════════════
                 optimizer_fast.zero_grad(set_to_none=True)
                 
-                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                with torch.amp.autocast('cuda', enabled=self.use_amp):
                     # Forward all exits
                     y1, y2, y3 = self.model.forward_all_exits(images)
                     
@@ -440,7 +440,7 @@ class NestedEarlyExitTrainer:
                 if step_counter % self.slow_update_freq == 0:
                     optimizer_slow.zero_grad(set_to_none=True)
                     
-                    with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    with torch.amp.autocast('cuda', enabled=self.use_amp):
                         # Recompute loss for slow weights
                         y1, y2, y3 = self.model.forward_all_exits(images)
                         loss_slow = (
