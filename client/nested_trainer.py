@@ -54,6 +54,123 @@ import gc
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# Continuum Memory System (Google Nested Learning, NeurIPS 2025)
+# =============================================================================
+
+class ContinuumMemorySystem(nn.Module):
+    """
+    Continuum Memory System (CMS) from Google's Nested Learning.
+    
+    Instead of binary short/long-term memory, CMS uses a SPECTRUM
+    of memory modules, each updating at different frequencies.
+    
+    Memory Levels:
+    - Fast (τ=1):   Update every step - immediate context
+    - Medium (τ=5): Update every 5 steps - recent patterns
+    - Slow (τ=25):  Update every 25 steps - long-term knowledge
+    
+    Memory Budget: O(1) - Fixed size, no growth over FL rounds!
+    Total overhead: 3 × backbone_size ≈ 30 MB
+    
+    Reference: "Nested Learning" (Google Research, NeurIPS 2025)
+    """
+    
+    def __init__(
+        self,
+        enabled: bool = True,
+        update_freqs: List[int] = [1, 5, 25],
+        decay_rates: List[float] = [0.0, 0.9, 0.99],
+        memory_weight: float = 0.01,
+    ):
+        """
+        Args:
+            enabled: Whether CMS is active
+            update_freqs: Update frequency for each memory level [fast, medium, slow]
+            decay_rates: EMA decay for each level (0 = no memory, 1 = static)
+            memory_weight: Weight of memory regularization loss
+        """
+        super().__init__()
+        self.enabled = enabled
+        self.update_freqs = update_freqs
+        self.decay_rates = decay_rates
+        self.memory_weight = memory_weight
+        self.num_levels = len(update_freqs)
+        
+        # Memory buffers (initialized on first use)
+        self.memories: List[Optional[torch.Tensor]] = [None] * self.num_levels
+        self._initialized = False
+        
+        logger.info(f"CMS initialized: enabled={enabled}, levels={self.num_levels}")
+        logger.info(f"  Update freqs: {update_freqs}")
+        logger.info(f"  Decay rates: {decay_rates}")
+    
+    def _initialize_memories(self, template: torch.Tensor):
+        """Initialize memory buffers from template tensor."""
+        if self._initialized:
+            return
+        for i in range(self.num_levels):
+            self.memories[i] = template.detach().clone()
+        self._initialized = True
+        logger.info(f"CMS memories initialized: {template.numel():,} params × {self.num_levels} levels")
+    
+    @torch.no_grad()
+    def update(self, weights: torch.Tensor, step: int):
+        """
+        Update memory buffers based on current step.
+        
+        Args:
+            weights: Current slow (backbone) weights as flat tensor
+            step: Current training step
+        """
+        if not self.enabled:
+            return
+        
+        # Initialize on first call
+        if not self._initialized:
+            self._initialize_memories(weights)
+        
+        # Update each memory level based on its frequency
+        for i, (freq, decay) in enumerate(zip(self.update_freqs, self.decay_rates)):
+            if step % freq == 0:
+                # EMA update: m = α*m + (1-α)*w
+                self.memories[i] = decay * self.memories[i] + (1 - decay) * weights.detach()
+    
+    def get_memory_loss(self, current_weights: torch.Tensor) -> torch.Tensor:
+        """
+        Compute memory regularization loss.
+        
+        Encourages model to stay close to slow memories (long-term knowledge).
+        Slower memories have higher weight (more important to preserve).
+        
+        Returns:
+            Memory loss term (weighted MSE to each memory level)
+        """
+        if not self.enabled or not self._initialized:
+            return torch.tensor(0.0, device=current_weights.device)
+        
+        loss = torch.tensor(0.0, device=current_weights.device)
+        
+        for i, mem in enumerate(self.memories):
+            if mem is not None:
+                # Slower memories (higher index) have higher weight
+                level_weight = (i + 1) / self.num_levels  # 0.33, 0.67, 1.0
+                loss = loss + level_weight * F.mse_loss(current_weights, mem)
+        
+        return self.memory_weight * loss
+    
+    def get_memory_stats(self) -> Dict[str, float]:
+        """Get statistics about memory divergence."""
+        if not self._initialized:
+            return {}
+        
+        stats = {}
+        for i, mem in enumerate(self.memories):
+            if mem is not None:
+                stats[f'memory_{i}_norm'] = mem.norm().item()
+        return stats
+
+
 class NestedEarlyExitTrainer:
     """
     Trainer implementing Nested Learning for Early-Exit Networks in FL.
@@ -103,6 +220,11 @@ class NestedEarlyExitTrainer:
         use_self_distillation: bool = True,
         distillation_weight: float = 0.5,
         distillation_temp: float = 3.0,
+        # CMS (Continuum Memory System) settings
+        cms_enabled: bool = True,
+        cms_update_freqs: List[int] = [1, 5, 25],
+        cms_decay_rates: List[float] = [0.0, 0.9, 0.99],
+        cms_weight: float = 0.01,
     ):
         # Device selection
         if device == "auto":
@@ -135,6 +257,14 @@ class NestedEarlyExitTrainer:
         # Separate parameter groups
         self._setup_parameter_groups()
         
+        # Continuum Memory System (Google Nested Learning)
+        self.cms = ContinuumMemorySystem(
+            enabled=cms_enabled,
+            update_freqs=cms_update_freqs,
+            decay_rates=cms_decay_rates,
+            memory_weight=cms_weight,
+        )
+        
         # Statistics
         self.stats = {
             'total_params': sum(p.numel() for p in self.model.parameters()),
@@ -142,12 +272,14 @@ class NestedEarlyExitTrainer:
             'slow_params': sum(p.numel() for p in self.slow_params),
             'fast_lr_multiplier': fast_lr_multiplier,
             'slow_update_freq': slow_update_freq,
+            'cms_enabled': cms_enabled,
         }
         
         logger.info(f"NestedEarlyExitTrainer: device={self.device}")
         logger.info(f"Fast params: {self.stats['fast_params']:,} | "
                     f"Slow params: {self.stats['slow_params']:,}")
         logger.info(f"Fast LR: {fast_lr_multiplier}x | Slow update: every {slow_update_freq} steps")
+        logger.info(f"CMS: enabled={cms_enabled}, levels={len(cms_update_freqs)}")
     
     def _setup_parameter_groups(self):
         """
@@ -320,6 +452,15 @@ class NestedEarlyExitTrainer:
                                 for p, g in zip(self.slow_params, w_global_slow)
                             )
                             loss_slow += (fedprox_mu / 2) * prox_term
+                        
+                        # ═══════════════════════════════════════════════════
+                        # CMS: Memory Regularization Loss
+                        # ═══════════════════════════════════════════════════
+                        if self.cms.enabled:
+                            # Flatten slow weights for CMS
+                            slow_tensor = torch.cat([p.view(-1) for p in self.slow_params])
+                            loss_memory = self.cms.get_memory_loss(slow_tensor)
+                            loss_slow = loss_slow + loss_memory
                     
                     if self.scaler is not None:
                         self.scaler.scale(loss_slow).backward()
@@ -328,6 +469,14 @@ class NestedEarlyExitTrainer:
                     else:
                         loss_slow.backward()
                         optimizer_slow.step()
+                    
+                    # ═══════════════════════════════════════════════════════
+                    # CMS: Update Memory Buffers (after optimizer step)
+                    # ═══════════════════════════════════════════════════════
+                    if self.cms.enabled:
+                        with torch.no_grad():
+                            slow_tensor = torch.cat([p.view(-1) for p in self.slow_params])
+                            self.cms.update(slow_tensor, step_counter)
                 
                 # Accumulate metrics
                 total_loss += loss_fast.item() * labels.size(0)
