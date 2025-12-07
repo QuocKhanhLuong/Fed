@@ -7,7 +7,7 @@ Author: Research Team - FL-QUIC-LoRA Project
 
 import sys
 from pathlib import Path
-sys.path.append(str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from client.model_trainer import MobileViTLoRATrainer, create_dummy_dataset
 from utils.config import Config

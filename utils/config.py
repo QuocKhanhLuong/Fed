@@ -36,7 +36,8 @@ class FederatedConfig:
     client_fraction: float = 1.0  # Fraction of clients to sample per round
     
     # Aggregation strategy
-    aggregation_strategy: str = "FedProx"  # FedAvg, FedProx, etc.
+    aggregation_strategy: str = "FedProx"  # FedAvg, FedProx, FedDyn
+    feddyn_alpha: float = 0.01  # FedDyn regularization strength (α)
     
     # Convergence tracking
     target_accuracy: float = 0.80  # Target accuracy for convergence detection

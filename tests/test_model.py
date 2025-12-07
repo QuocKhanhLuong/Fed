@@ -1,6 +1,6 @@
 """
 Test Model Training Components
-Verify MobileViT + LoRA trainer and FL client
+Verify Early-Exit trainer and FL client
 
 Author: Research Team - FL-QUIC-LoRA Project
 """
@@ -8,38 +8,37 @@ Author: Research Team - FL-QUIC-LoRA Project
 import sys
 from pathlib import Path
 
-sys.path.append(str(Path(__file__).parent))
+# Add parent directory (Fed/) to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from client.model_trainer import MobileViTLoRATrainer, create_dummy_dataset
+from client.early_exit_trainer import EarlyExitTrainer, create_dummy_dataset
 from client.fl_client import create_fl_client
 
 print("="*70)
-print("Testing Model Training Components")
+print("Testing Early-Exit Training Components")
 print("="*70)
 
+
 def test_trainer():
-    """Test MobileViTLoRATrainer"""
+    """Test EarlyExitTrainer"""
     print("\n" + "-"*70)
-    print("TEST 1: MobileViT + LoRA Trainer")
+    print("TEST 1: Early-Exit Trainer")
     print("-"*70)
     
     # Create trainer
     print("Creating trainer...")
-    trainer = MobileViTLoRATrainer(
+    trainer = EarlyExitTrainer(
         num_classes=10,
-        lora_r=4,  # Small rank for fast testing
         use_mixed_precision=False,  # For CPU compatibility
     )
     
     print(f"✓ Trainer created")
-    print(f"  Total parameters: {trainer.stats['total_params']:,}")
-    print(f"  Trainable parameters: {trainer.stats['trainable_params']:,}")
-    print(f"  LoRA parameters: {trainer.stats['lora_params']:,}")
+    print(f"  Device: {trainer.device}")
     
     # Create dummy data
     print("\nCreating dummy dataset...")
     train_loader, test_loader = create_dummy_dataset(num_samples=50)
-    print(f"✓ Dataset created: 50 train, 10 test samples")
+    print(f"✓ Dataset created: 50 train samples")
     
     # Extract parameters
     print("\nExtracting parameters...")
@@ -56,12 +55,13 @@ def test_trainer():
     print(f"  Accuracy: {metrics['accuracy']:.4f}")
     print(f"  Samples: {metrics['num_samples']}")
     
-    # Evaluate
-    print("\nEvaluating...")
-    eval_metrics = trainer.evaluate(test_loader)
+    # Evaluate with early exit
+    print("\nEvaluating with early exit (threshold=0.5)...")
+    eval_metrics = trainer.evaluate(test_loader, threshold=0.5)
     print(f"✓ Evaluation complete")
     print(f"  Loss: {eval_metrics['loss']:.4f}")
     print(f"  Accuracy: {eval_metrics['accuracy']:.4f}")
+    print(f"  Avg Exit: {eval_metrics.get('avg_exit', 'N/A')}")
     
     # Verify parameters changed
     params_after = trainer.get_parameters()
@@ -89,11 +89,12 @@ def test_fl_client():
     
     # Create FL client
     print("\nCreating FL client...")
+    train_loader, test_loader = create_dummy_dataset(num_samples=50)
     client = create_fl_client(
         num_classes=10,
-        lora_r=4,
         local_epochs=1,
-        use_dummy_data=True,
+        train_loader=train_loader,
+        test_loader=test_loader,
     )
     print(f"✓ FL Client created")
     
@@ -140,7 +141,7 @@ if __name__ == "__main__":
             print("❌ SOME TESTS FAILED")
         print("="*70)
         
-        print("\nModel training components are ready!")
+        print("\nEarly-Exit training components are ready!")
         print("\nNext steps:")
         print("  1. Test server: python server/app_server.py --help")
         print("  2. Test client: python client/app_client.py --help")

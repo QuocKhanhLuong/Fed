@@ -7,7 +7,7 @@ import numpy as np
 import sys
 from pathlib import Path
 
-sys.path.append(str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from transport.network_monitor import NetworkMonitor
 from transport.serializer import ModelSerializer
