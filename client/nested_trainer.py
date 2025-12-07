@@ -85,7 +85,7 @@ class ContinuumMemorySystem(nn.Module):
         enabled: bool = True,
         update_freqs: List[int] = [1, 5, 25],
         decay_rates: List[float] = [0.0, 0.9, 0.99],
-        memory_weight: float = 0.01,
+        memory_weight: float = 0.001,  # Reduced from 0.01 to prevent gradient explosion
     ):
         """
         Args:
@@ -217,7 +217,7 @@ class NestedEarlyExitTrainer:
         self,
         num_classes: int = 10,
         exit_weights: List[float] = [0.3, 0.3, 0.4],
-        fast_lr_multiplier: float = 10.0,
+        fast_lr_multiplier: float = 3.0,  # Reduced from 10.0 to prevent NaN
         slow_update_freq: int = 5,
         device: str = "auto",
         use_mixed_precision: bool = True,
@@ -228,7 +228,7 @@ class NestedEarlyExitTrainer:
         cms_enabled: bool = True,
         cms_update_freqs: List[int] = [1, 5, 25],
         cms_decay_rates: List[float] = [0.0, 0.9, 0.99],
-        cms_weight: float = 0.01,
+        cms_weight: float = 0.001,  # Reduced to prevent gradient explosion
     ):
         # Device selection
         if device == "auto":
@@ -427,10 +427,13 @@ class NestedEarlyExitTrainer:
                 # Backward and update fast weights
                 if self.scaler is not None:
                     self.scaler.scale(loss_fast).backward(retain_graph=True)
+                    self.scaler.unscale_(optimizer_fast)
+                    torch.nn.utils.clip_grad_norm_(self.fast_params, max_norm=1.0)
                     self.scaler.step(optimizer_fast)
                     self.scaler.update()
                 else:
                     loss_fast.backward(retain_graph=True)
+                    torch.nn.utils.clip_grad_norm_(self.fast_params, max_norm=1.0)
                     optimizer_fast.step()
                 
                 # ═══════════════════════════════════════════════════════
@@ -468,10 +471,13 @@ class NestedEarlyExitTrainer:
                     
                     if self.scaler is not None:
                         self.scaler.scale(loss_slow).backward()
+                        self.scaler.unscale_(optimizer_slow)
+                        torch.nn.utils.clip_grad_norm_(self.slow_params, max_norm=1.0)
                         self.scaler.step(optimizer_slow)
                         self.scaler.update()
                     else:
                         loss_slow.backward()
+                        torch.nn.utils.clip_grad_norm_(self.slow_params, max_norm=1.0)
                         optimizer_slow.step()
                     
                     # ═══════════════════════════════════════════════════════
