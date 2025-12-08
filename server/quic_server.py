@@ -338,6 +338,11 @@ class FLQuicServer:
         client.is_training = False
         client.last_update_received = datetime.now()
         
+        # CRITICAL: Clear receive_buffers to prevent stream ID collision with next client
+        # Each client reuses stream IDs 0,4,8 - old buffers cause wrong lookup
+        client.protocol._receive_buffers.clear()
+        client.protocol._active_streams.clear()
+        
         logger.info(f"Stored update from {client_id}: {len(weights)} arrays, "
                    f"{num_samples} samples")
         
