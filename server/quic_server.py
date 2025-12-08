@@ -80,13 +80,14 @@ class FLServerHandler(FLMessageHandler):
         self.server = server
         logger.info("FLServerHandler initialized")
     
-    async def handle_weights(self, stream_id: int, payload: bytes) -> None:
+    async def handle_weights(self, stream_id: int, payload: bytes, protocol: Optional[Any] = None) -> None:
         """
         Handle weight updates from clients.
         
         Args:
             stream_id: Stream ID
             payload: Serialized weights
+            protocol: Protocol instance that received this message
         """
         try:
             # Deserialize weights
@@ -94,8 +95,8 @@ class FLServerHandler(FLMessageHandler):
             
             logger.info(f"Received {len(weights)} weight arrays from stream {stream_id}")
             
-            # Find client by stream
-            client_id = self.server._find_client_by_stream(stream_id)
+            # FIXED: Find client by protocol object, not stream ID
+            client_id = self.server._find_client_by_protocol(protocol)
             if client_id:
                 # Store update for aggregation
                 await self.server._receive_client_update(client_id, weights)
@@ -272,6 +273,24 @@ class FLQuicServer:
         logger.info(f"New client connected: {client_id} from {remote_addr} (Total: {len(self.clients)})")
         
         return protocol
+    
+    def _find_client_by_protocol(self, protocol: Any) -> Optional[str]:
+        """
+        Find client ID by protocol object reference.
+        This is the reliable way to identify which client sent a message.
+        
+        Args:
+            protocol: FLQuicProtocol instance
+            
+        Returns:
+            Client ID or None
+        """
+        if protocol is None:
+            return None
+        for client_id, client in self.clients.items():
+            if client.protocol is protocol:
+                return client_id
+        return None
     
     def _find_client_by_stream(self, stream_id: int) -> Optional[str]:
         """
