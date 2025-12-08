@@ -32,7 +32,7 @@ class FederatedConfig:
     """Federated Learning configuration"""
     num_rounds: int = 10
     min_clients: int = 2
-    min_available_clients: int = 2
+    min_available_clients: int = 3  # Changed from 2 to match NUM_CLIENTS
     client_fraction: float = 1.0  # Fraction of clients to sample per round
     
     # Aggregation strategy

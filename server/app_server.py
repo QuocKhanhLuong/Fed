@@ -23,7 +23,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from server.quic_server import FLQuicServer
 from server.fl_strategy import create_strategy
 from utils.config import Config, get_server_config
-from client.model_trainer import MobileViTLoRATrainer
+from client.nested_trainer import NestedEarlyExitTrainer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,17 +88,16 @@ class FLServerApp:
         )
         
         # FIX DEADLOCK: Khởi tạo global model để gửi cho clients ngay round 1
-        logger.info("Initializing Global Model (MobileViT + LoRA)...")
+        logger.info("Initializing Global Model (NestedEarlyExit + TimmPretrained)...")
         try:
             # Tạo model tạm để lấy trọng số khởi tạo (pretrained từ timm)
-            dummy_trainer = MobileViTLoRATrainer(
+            dummy_trainer = NestedEarlyExitTrainer(
                 num_classes=config.model.num_classes,
-                lora_r=config.model.lora_r,
                 device="cuda",  
                 use_mixed_precision=False,
-                use_sam=False,
-                use_tta=False,
-                use_lora=config.model.use_lora,
+                use_self_distillation=True,
+                cms_enabled=True,
+                use_timm_pretrained=True,
             )
             
             # Trích xuất weights và gán vào server
