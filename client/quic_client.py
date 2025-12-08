@@ -322,10 +322,15 @@ class FLQuicClient:
             # Get connection stats before sending (if available)
             bytes_sent_before = 0
             bytes_received_before = 0
-            if self.protocol and hasattr(self.protocol, '_quic'):
-                stats_before = self.protocol._quic._loss.get_stats()  # type: ignore
-                bytes_sent_before = getattr(stats_before, 'bytes_sent', 0)
-                bytes_received_before = getattr(stats_before, 'bytes_received', 0)
+            try:
+                if self.protocol and hasattr(self.protocol, '_quic'):
+                    # Try to get stats (may not work in all aioquic versions)
+                    if hasattr(self.protocol._quic, '_loss') and hasattr(self.protocol._quic._loss, 'get_stats'):
+                        stats_before = self.protocol._quic._loss.get_stats()
+                        bytes_sent_before = getattr(stats_before, 'bytes_sent', 0)
+                        bytes_received_before = getattr(stats_before, 'bytes_received', 0)
+            except Exception:
+                pass  # Stats not available, not critical
             
             # 1. Send Metadata FIRST
             # This ensures the server knows WHO is sending and WHAT the status is
@@ -352,10 +357,14 @@ class FLQuicClient:
             # Get connection stats after sending
             bytes_sent_after = bytes_sent_before
             bytes_received_after = bytes_received_before
-            if self.protocol and hasattr(self.protocol, '_quic'):
-                stats_after = self.protocol._quic._loss.get_stats()  # type: ignore
-                bytes_sent_after = getattr(stats_after, 'bytes_sent', bytes_sent_before)
-                bytes_received_after = getattr(stats_after, 'bytes_received', bytes_received_before)
+            try:
+                if self.protocol and hasattr(self.protocol, '_quic'):
+                    if hasattr(self.protocol._quic, '_loss') and hasattr(self.protocol._quic._loss, 'get_stats'):
+                        stats_after = self.protocol._quic._loss.get_stats()
+                        bytes_sent_after = getattr(stats_after, 'bytes_sent', bytes_sent_before)
+                        bytes_received_after = getattr(stats_after, 'bytes_received', bytes_received_before)
+            except Exception:
+                pass  # Stats not available, not critical
             
             # Update system metrics with deltas
             comm_metrics = self.system_metrics.update_communication(
