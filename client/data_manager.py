@@ -34,7 +34,11 @@ except ImportError:
     logger.warning("medmnist not installed - MedMNIST datasets unavailable")
 
 
-def get_transforms(image_size: int = 224, is_grayscale: bool = False) -> Tuple[transforms.Compose, transforms.Compose]:
+def get_transforms(
+    image_size: int = 224, 
+    is_grayscale: bool = False,
+    use_strong_aug: bool = True,
+) -> Tuple[transforms.Compose, transforms.Compose]:
     """
     Get standard transforms for training and testing.
     
@@ -45,6 +49,7 @@ def get_transforms(image_size: int = 224, is_grayscale: bool = False) -> Tuple[t
     Args:
         image_size: Target image size (default: 224 for MobileViT)
         is_grayscale: Whether the source images are grayscale
+        use_strong_aug: Use RandAugment + RandomErasing for SOTA results
         
     Returns:
         Tuple of (train_transform, test_transform)
@@ -57,7 +62,8 @@ def get_transforms(image_size: int = 224, is_grayscale: bool = False) -> Tuple[t
     
     # Training transforms with augmentation
     train_transform_list: list = [
-        transforms.Resize((image_size, image_size)),
+        transforms.Resize((image_size + 32, image_size + 32)),  # Resize larger for crop
+        transforms.RandomCrop(image_size),  # Random crop to target size
     ]
     
     # Convert grayscale to RGB if needed
@@ -66,11 +72,30 @@ def get_transforms(image_size: int = 224, is_grayscale: bool = False) -> Tuple[t
     
     train_transform_list.extend([
         transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomRotation(degrees=15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+    ])
+    
+    # Strong augmentation for better accuracy
+    if use_strong_aug:
+        train_transform_list.extend([
+            transforms.RandAugment(num_ops=2, magnitude=9),  # AutoAugment-style
+            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
+        ])
+    else:
+        train_transform_list.extend([
+            transforms.RandomRotation(degrees=15),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+        ])
+    
+    train_transform_list.extend([
         transforms.ToTensor(),
         normalize,
     ])
+    
+    # Add RandomErasing (Cutout) for strong augmentation
+    if use_strong_aug:
+        train_transform_list.append(
+            transforms.RandomErasing(p=0.25, scale=(0.02, 0.2), ratio=(0.3, 3.3))
+        )
     
     # Test transforms (no augmentation)
     test_transform_list: list = [
@@ -87,6 +112,8 @@ def get_transforms(image_size: int = 224, is_grayscale: bool = False) -> Tuple[t
     
     train_transform = transforms.Compose(train_transform_list)
     test_transform = transforms.Compose(test_transform_list)
+    
+    logger.info(f"Transforms: strong_aug={use_strong_aug}, image_size={image_size}")
     
     return train_transform, test_transform
 
