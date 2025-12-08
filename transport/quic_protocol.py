@@ -90,22 +90,33 @@ class FLQuicProtocol(QuicConnectionProtocol):
     def _process_stream_buffer(self, stream_id: int) -> None:
         try:
             buffer = self._receive_buffers[stream_id]
+            logger.info(f"Processing buffer stream {stream_id}: {len(buffer)} bytes")
             while len(buffer) > 0:
-                if len(buffer) < 5: break
+                if len(buffer) < 5: 
+                    logger.debug(f"Buffer too small: {len(buffer)} < 5")
+                    break
                 import struct
                 length = struct.unpack('>I', buffer[0:4])[0]
-                if len(buffer) < 5 + length: break
+                if len(buffer) < 5 + length: 
+                    logger.debug(f"Incomplete message: {len(buffer)} < {5+length}")
+                    break
                 
                 msg_data = buffer[:5+length]
                 msg_type, payload = self._codec.decode_message(msg_data)
                 self._stats['messages_received'] += 1
+                logger.info(f"Decoded message: type={msg_type}, payload={len(payload)} bytes")
                 
                 if self._stream_handler:
+                    logger.info(f"Creating task for stream_handler")
                     asyncio.create_task(self._stream_handler(stream_id, msg_type, payload))
+                else:
+                    logger.warning("No stream_handler configured!")
                 
                 del buffer[:5+length]
         except Exception as e:
             logger.error(f"Stream {stream_id} error: {e}")
+            import traceback
+            traceback.print_exc()
             self._send_error_message(stream_id, str(e))
     
     def _handle_connection_terminated(self, event: ConnectionTerminated) -> None:
