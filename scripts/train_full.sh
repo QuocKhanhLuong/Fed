@@ -187,7 +187,11 @@ results = {
 
 import json
 os.makedirs("results", exist_ok=True)
-with open(f"results/training_{time.strftime('%Y%m%d_%H%M%S')}.json", 'w') as f:
+os.makedirs("checkpoints", exist_ok=True)
+
+# Save JSON results
+timestamp = time.strftime('%Y%m%d_%H%M%S')
+with open(f"results/training_{timestamp}.json", 'w') as f:
     # Convert numpy types
     def convert(obj):
         if isinstance(obj, np.ndarray):
@@ -200,6 +204,22 @@ with open(f"results/training_{time.strftime('%Y%m%d_%H%M%S')}.json", 'w') as f:
     
     json.dump(results, f, indent=2, default=convert)
 
-print(f"\n✅ Results saved to results/training_*.json")
+# Save model checkpoint
+checkpoint = {
+    'model_state_dict': trainer.model.state_dict(),
+    'config': CONFIG,
+    'final_accuracy': test_metrics['accuracy'],
+    'best_val_accuracy': max(v['accuracy'] for v in val_history),
+    'epochs_trained': CONFIG['num_epochs'],
+}
+checkpoint_path = f"checkpoints/model_{timestamp}.pth"
+torch.save(checkpoint, checkpoint_path)
+
+# Also save as 'best_model.pth' for easy loading
+torch.save(checkpoint, "checkpoints/best_model.pth")
+
+print(f"\n✅ Results saved to results/training_{timestamp}.json")
+print(f"✅ Model saved to {checkpoint_path}")
+print(f"✅ Best model saved to checkpoints/best_model.pth")
 print("="*60)
 PYTHON_SCRIPT
