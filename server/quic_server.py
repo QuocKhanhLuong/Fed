@@ -334,6 +334,10 @@ class FLQuicServer:
         self.client_updates[client_id] = (weights, num_samples)
         self.stats['total_updates_received'] += 1
         
+        # CRITICAL: Reset is_training so fallback lookup works for next client
+        client.is_training = False
+        client.last_update_received = datetime.now()
+        
         logger.info(f"Stored update from {client_id}: {len(weights)} arrays, "
                    f"{num_samples} samples")
         
