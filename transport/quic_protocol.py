@@ -93,8 +93,7 @@ class FLQuicProtocol(QuicConnectionProtocol):
     def _process_stream_buffer(self, stream_id: int) -> None:
         try:
             buffer = self._receive_buffers[stream_id]
-            # DEBUG only - too verbose for INFO
-            logger.debug(f"Processing buffer stream {stream_id}: {len(buffer)} bytes")
+            logger.info(f"Processing buffer stream {stream_id}: {len(buffer)} bytes")
             while len(buffer) > 0:
                 if len(buffer) < 5: 
                     logger.debug(f"Buffer too small: {len(buffer)} < 5")
@@ -108,15 +107,11 @@ class FLQuicProtocol(QuicConnectionProtocol):
                 msg_data = buffer[:5+length]
                 msg_type, payload = self._codec.decode_message(msg_data)
                 self._stats['messages_received'] += 1
-                
-                # Only log final decoded message (concise)
-                msg_type_name = {1: "WEIGHTS", 2: "METADATA", 255: "ERROR"}.get(msg_type, str(msg_type))
-                logger.info(f"Received {msg_type_name}: {len(payload)/1024/1024:.2f}MB on stream {stream_id}")
+                logger.info(f"Decoded message: type={msg_type}, payload={len(payload)} bytes")
                 
                 if self._stream_handler:
-                    logger.debug(f"Creating task for stream_handler")
-                    # Pass protocol reference (self) so server can identify which client
-                    asyncio.create_task(self._stream_handler(stream_id, msg_type, payload, self))
+                    logger.info(f"Creating task for stream_handler")
+                    asyncio.create_task(self._stream_handler(stream_id, msg_type, payload))
                 else:
                     logger.warning("No stream_handler configured!")
                 
@@ -194,21 +189,21 @@ class FLMessageHandler:
     def __init__(self, serializer: Optional[ModelSerializer] = None):
         self.serializer = serializer or ModelSerializer()
     
-    async def handle_message(self, stream_id: int, msg_type: int, payload: bytes, protocol: Optional['FLQuicProtocol'] = None) -> None:
+    async def handle_message(self, stream_id: int, msg_type: int, payload: bytes) -> None:
         if msg_type == MessageCodec.MSG_TYPE_WEIGHTS:
-            await self.handle_weights(stream_id, payload, protocol)
+            await self.handle_weights(stream_id, payload)
         elif msg_type == MessageCodec.MSG_TYPE_METADATA:
-            await self.handle_metadata(stream_id, payload, protocol)
+            await self.handle_metadata(stream_id, payload)
         elif msg_type == MessageCodec.MSG_TYPE_CONFIG:
             await self.handle_config(stream_id, payload)
         elif msg_type == MessageCodec.MSG_TYPE_ERROR:
             await self.handle_error(stream_id, payload)
     
-    async def handle_weights(self, stream_id: int, payload: bytes, protocol: Optional['FLQuicProtocol'] = None) -> None:
+    async def handle_weights(self, stream_id: int, payload: bytes) -> None:
         weights = self.serializer.deserialize_weights(payload)
         logger.info(f"Received {len(weights)} weight arrays")
     
-    async def handle_metadata(self, stream_id: int, payload: bytes, protocol: Optional['FLQuicProtocol'] = None) -> None:
+    async def handle_metadata(self, stream_id: int, payload: bytes) -> None:
         logger.info(f"Received metadata")
     
     async def handle_config(self, stream_id: int, payload: bytes) -> None:

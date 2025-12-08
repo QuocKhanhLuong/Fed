@@ -80,14 +80,13 @@ class FLServerHandler(FLMessageHandler):
         self.server = server
         logger.info("FLServerHandler initialized")
     
-    async def handle_weights(self, stream_id: int, payload: bytes, protocol: Optional[Any] = None) -> None:
+    async def handle_weights(self, stream_id: int, payload: bytes) -> None:
         """
         Handle weight updates from clients.
         
         Args:
             stream_id: Stream ID
             payload: Serialized weights
-            protocol: Protocol instance that received this message
         """
         try:
             # Deserialize weights
@@ -95,8 +94,8 @@ class FLServerHandler(FLMessageHandler):
             
             logger.info(f"Received {len(weights)} weight arrays from stream {stream_id}")
             
-            # FIXED: Find client by protocol object, not stream ID
-            client_id = self.server._find_client_by_protocol(protocol)
+            # Find client by stream
+            client_id = self.server._find_client_by_stream(stream_id)
             if client_id:
                 # Store update for aggregation
                 await self.server._receive_client_update(client_id, weights)
@@ -274,24 +273,6 @@ class FLQuicServer:
         
         return protocol
     
-    def _find_client_by_protocol(self, protocol: Any) -> Optional[str]:
-        """
-        Find client ID by protocol object reference.
-        This is the reliable way to identify which client sent a message.
-        
-        Args:
-            protocol: FLQuicProtocol instance
-            
-        Returns:
-            Client ID or None
-        """
-        if protocol is None:
-            return None
-        for client_id, client in self.clients.items():
-            if client.protocol is protocol:
-                return client_id
-        return None
-    
     def _find_client_by_stream(self, stream_id: int) -> Optional[str]:
         """
         Find client ID by stream ID.
@@ -398,37 +379,27 @@ class FLQuicServer:
         if sequential:
             # SEQUENTIAL: Train one client at a time (for single GPU)
             logger.info("Using SEQUENTIAL mode (single GPU optimization)")
-            client_list = list(self.clients.items())
-            logger.info(f"Client order: {[cid for cid, _ in client_list]}")
-            
-            for idx, (client_id, client) in enumerate(client_list):
+            for client_id, client in self.clients.items():
                 try:
-                    logger.info(f"  [{idx+1}/{len(client_list)}] Sending model to {client_id}...")
+                    logger.info(f"  → Sending model to {client_id}...")
                     client.protocol.send_weights(weights)
                     client.current_round = self.current_round
                     client.is_training = True
                     
                     # Wait for this client's update before sending to next
-                    logger.info(f"  [{idx+1}/{len(client_list)}] Waiting for {client_id} to complete training...")
+                    logger.info(f"  → Waiting for {client_id} to complete training...")
                     timeout = 600  # 10 minutes per client
                     start_wait = datetime.now()
-                    last_progress_log = 0
                     
                     while client_id not in self.client_updates:
                         await asyncio.sleep(1.0)
                         elapsed = (datetime.now() - start_wait).total_seconds()
-                        
-                        # Log progress every 30 seconds
-                        if int(elapsed) // 30 > last_progress_log:
-                            last_progress_log = int(elapsed) // 30
-                            logger.info(f"    ... still waiting for {client_id} ({int(elapsed)}s elapsed, updates: {list(self.client_updates.keys())})")
-                        
                         if elapsed > timeout:
                             logger.warning(f"  → Timeout waiting for {client_id}")
                             break
                     
                     if client_id in self.client_updates:
-                        logger.info(f"  ✓ [{idx+1}/{len(client_list)}] {client_id} completed training")
+                        logger.info(f"  ✓ {client_id} completed training")
                     
                 except Exception as e:
                     logger.error(f"Failed to send model to {client_id}: {e}")
