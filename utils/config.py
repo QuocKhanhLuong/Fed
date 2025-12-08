@@ -49,7 +49,7 @@ class ModelConfig:
     """Model architecture configuration"""
     # MobileViT settings
     model_name: str = "apple/mobilevit-small"
-    num_classes: int = 10
+    num_classes: int = 100  # CIFAR-100
     image_size: int = 224
     
     # LoRA settings (Feature D)
