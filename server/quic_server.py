@@ -579,6 +579,10 @@ class FLQuicServer:
         logger.info(f"   - JSON: {json_path}")
         logger.info(f"   - Tables: {md_path}")
         logger.info(f"   - Best model: {self.checkpoint_manager.checkpoint_dir}/best_model.npz")
+        
+        # AUTO-SHUTDOWN after all rounds complete
+        logger.info("\n🔌 Shutting down server and clients...")
+        self.shutdown()
     
     async def start(self) -> None:
         """Start the QUIC server"""
