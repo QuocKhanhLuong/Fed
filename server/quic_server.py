@@ -292,17 +292,27 @@ class FLQuicServer:
             if stream_id in client.protocol._receive_buffers:
                 return client_id
             # Check if this stream belongs to the client's QUIC connection
-            # by checking if any stream_id from same connection (even IDs from client)
-            # Note: QUIC stream IDs - even IDs are client-initiated, odd are server-initiated
-            # Streams on same connection will share the same protocol
             if hasattr(client.protocol, '_quic'):
-                # Any stream on this connection belongs to this client
                 try:
-                    # Check if stream exists on this connection
                     if stream_id in client.protocol._quic._streams:
                         return client_id
                 except:
                     pass
+        
+        # FALLBACK: If only one client is training, it must be them
+        training_clients = [(cid, c) for cid, c in self.clients.items() if c.is_training]
+        if len(training_clients) == 1:
+            logger.info(f"  → Fallback: Only one training client, assuming {training_clients[0][0]}")
+            return training_clients[0][0]
+        
+        # Last resort: check if stream is even (client-initiated)
+        if stream_id % 4 == 0:  # QUIC bidirectional client-initiated
+            # Find client that recently received model (is_training=True)
+            for client_id, client in self.clients.items():
+                if client.is_training and client_id not in self.client_updates:
+                    logger.info(f"  → Fallback: Assuming training client {client_id}")
+                    return client_id
+        
         return None
     
     async def _receive_client_update(self, client_id: str, weights: List[np.ndarray]) -> None:
