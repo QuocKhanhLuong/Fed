@@ -34,7 +34,7 @@ CONFIG = {
     'batch_size': 16,
     'num_workers': 2,
     'num_classes': 100,
-    'num_epochs': 30,  # Increased from 5 for better convergence
+    'num_epochs': 50,  # Increased for better convergence with pretrained
     'learning_rate': 1e-3,
     'dataset': 'cifar100',
 }
@@ -94,6 +94,7 @@ trainer = NestedEarlyExitTrainer(
     cms_enabled=True,
     fast_lr_multiplier=3.0,  # Reduced from 10.0 for stability
     slow_update_freq=5,
+    use_timm_pretrained=True,  # Full pretrained backbone
 )
 
 print(f"Total params: {trainer.stats['total_params']:,}")

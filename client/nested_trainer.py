@@ -230,6 +230,8 @@ class NestedEarlyExitTrainer:
         cms_update_freqs: List[int] = [1, 5, 25],
         cms_decay_rates: List[float] = [0.0, 0.9, 0.99],
         cms_weight: float = 0.001,  # Reduced to prevent gradient explosion
+        # NEW: Use full pretrained backbone from timm
+        use_timm_pretrained: bool = True,
     ):
         # Device selection
         if device == "auto":
@@ -238,8 +240,14 @@ class NestedEarlyExitTrainer:
             self.device = torch.device(device)
         
         # Import and create model
-        from models.early_exit_mobilevit import EarlyExitMobileViTv2
-        self.model = EarlyExitMobileViTv2(num_classes=num_classes)
+        if use_timm_pretrained:
+            from models.early_exit_mobilevit import TimmPretrainedEarlyExit
+            self.model = TimmPretrainedEarlyExit(num_classes=num_classes)
+            logger.info("Using TimmPretrainedEarlyExit (full pretrained backbone)")
+        else:
+            from models.early_exit_mobilevit import EarlyExitMobileViTv2
+            self.model = EarlyExitMobileViTv2(num_classes=num_classes)
+            logger.info("Using EarlyExitMobileViTv2 (custom architecture)")
         self.model.to(self.device)
         
         # Mixed precision setup
