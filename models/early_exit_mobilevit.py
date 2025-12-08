@@ -270,42 +270,60 @@ class EarlyExitMobileViTv2(nn.Module):
         """Load pretrained weights from timm MobileViTv2."""
         logger.info("Loading pretrained MobileViTv2 backbone from timm...")
         try:
-            # Load pretrained MobileViTv2
+            # Use mobilevitv2_100 which has 32 channels in stem (matches our architecture)
             pretrained_model = timm.create_model(
-                'mobilevitv2_050.cvnets_in1k', 
+                'mobilevitv2_100.cvnets_in1k', 
                 pretrained=True, 
                 num_classes=self.num_classes
             )
             
-            # Copy stem weights (first conv)
-            self.stage1[0][0].weight.data.copy_(
-                pretrained_model.stem.conv.weight.data
-            )
-            self.stage1[0][1].weight.data.copy_(
-                pretrained_model.stem.bn.weight.data
-            )
-            self.stage1[0][1].bias.data.copy_(
-                pretrained_model.stem.bn.bias.data
-            )
-            
-            logger.info("✓ Pretrained backbone loaded successfully")
+            # Copy stem weights (first conv - 32 channels)
+            if self.stage1[0][0].weight.shape == pretrained_model.stem.conv.weight.shape:
+                self.stage1[0][0].weight.data.copy_(
+                    pretrained_model.stem.conv.weight.data
+                )
+                self.stage1[0][1].weight.data.copy_(
+                    pretrained_model.stem.bn.weight.data
+                )
+                self.stage1[0][1].bias.data.copy_(
+                    pretrained_model.stem.bn.bias.data
+                )
+                self.stage1[0][1].running_mean.data.copy_(
+                    pretrained_model.stem.bn.running_mean.data
+                )
+                self.stage1[0][1].running_var.data.copy_(
+                    pretrained_model.stem.bn.running_var.data
+                )
+                logger.info("✓ Stem weights loaded from pretrained model")
+            else:
+                logger.warning(f"Stem shape mismatch: {self.stage1[0][0].weight.shape} vs {pretrained_model.stem.conv.weight.shape}")
             
             # Initialize exit classifiers (not pretrained)
             for exit_module in [self.exit1, self.exit2]:
                 for m in exit_module.modules():
                     if isinstance(m, nn.Linear):
-                        nn.init.normal_(m.weight, 0, 0.01)
+                        nn.init.xavier_uniform_(m.weight)
                         if m.bias is not None:
                             nn.init.zeros_(m.bias)
                             
-            # Initialize final exit
+            # Initialize final exit with better init
             for m in self.exit3.modules():
                 if isinstance(m, nn.Linear):
-                    nn.init.normal_(m.weight, 0, 0.01)
+                    nn.init.xavier_uniform_(m.weight)
                     if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+            
+            # Initialize remaining layers with kaiming
+            for name, m in self.named_modules():
+                if 'stage1.0' not in name:  # Skip stem (already loaded)
+                    if isinstance(m, nn.Conv2d):
+                        nn.init.kaiming_normal_(m.weight, mode='fan_out')
+                    elif isinstance(m, nn.BatchNorm2d):
+                        nn.init.ones_(m.weight)
                         nn.init.zeros_(m.bias)
                         
             del pretrained_model
+            logger.info("✓ Pretrained backbone loaded successfully")
             
         except Exception as e:
             logger.warning(f"Failed to load pretrained weights: {e}")
