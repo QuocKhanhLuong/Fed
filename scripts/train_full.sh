@@ -34,7 +34,7 @@ CONFIG = {
     'batch_size': 16,
     'num_workers': 2,
     'num_classes': 100,
-    'num_epochs': 5,
+    'num_epochs': 30,  # Increased from 5 for better convergence
     'learning_rate': 1e-3,
     'dataset': 'cifar100',
 }
@@ -92,7 +92,7 @@ trainer = NestedEarlyExitTrainer(
     use_mixed_precision=True,
     use_self_distillation=True,
     cms_enabled=True,
-    fast_lr_multiplier=10.0,
+    fast_lr_multiplier=3.0,  # Reduced from 10.0 for stability
     slow_update_freq=5,
 )
 

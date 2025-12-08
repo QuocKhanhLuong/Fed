@@ -243,7 +243,7 @@ class NestedEarlyExitTrainer:
         
         # Mixed precision setup
         self.use_amp = use_mixed_precision and (self.device.type == "cuda")
-        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+        self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
         
         # Exit loss weights
         self.exit_weights = exit_weights

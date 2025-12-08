@@ -11,7 +11,51 @@ import timm
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from utils.metrics import ClassificationEvaluator, ResourceTracker
-from models.gated_mobilevit import GatedBlockWrapper
+
+# GatedBlockWrapper for network-adaptive gating
+class GatedBlockWrapper(nn.Module):
+    """Wraps a MobileViT block with adaptive gating based on network quality."""
+    def __init__(self, block: nn.Module, expert_dim: int = 64):
+        super().__init__()
+        self.block = block
+        self.quality_score = 1.0
+        
+        # Lightweight expert for low-quality scenarios
+        self.expert = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.LazyLinear(expert_dim),
+            nn.ReLU(),
+        )
+        self.gate = nn.Sequential(
+            nn.LazyLinear(1),
+            nn.Sigmoid(),
+        )
+        self._initialized = False
+    
+    def set_quality_score(self, score: float):
+        self.quality_score = score
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Initialize lazy layers
+        if not self._initialized:
+            with torch.no_grad():
+                _ = self.expert(x)
+                expert_out = self.expert(x)
+                _ = self.gate(expert_out)
+            self._initialized = True
+        
+        # High quality: use full block
+        if self.quality_score >= 0.8:
+            return self.block(x)
+        
+        # Low quality: blend with expert path
+        block_out = self.block(x)
+        expert_feat = self.expert(x)
+        gate_val = self.gate(expert_feat)
+        
+        # gate_val determines how much to trust the block output
+        return block_out * gate_val.view(-1, 1, 1, 1)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -124,7 +168,7 @@ class MobileViTLoRATrainer:
         self.model.to(self.device)
         self._freeze_backbone()
         
-        self.scaler = torch.cuda.amp.GradScaler() if use_mixed_precision and self.device.type == "cuda" else None
+        self.scaler = torch.amp.GradScaler('cuda') if use_mixed_precision and self.device.type == "cuda" else None
         
         # Create checkpoint directory if it doesn't exist
         os.makedirs(self.checkpoint_dir, exist_ok=True)
