@@ -20,7 +20,7 @@ class NetworkConfig:
     # QUIC settings
     enable_0rtt: bool = True
     max_stream_data: int = 10 * 1024 * 1024  # 10 MB
-    idle_timeout: float = 60.0
+    idle_timeout: float = 600.0  # Increased for long training (10 min)
     
     # Connection settings
     connection_timeout: float = 10.0

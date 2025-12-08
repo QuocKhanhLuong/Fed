@@ -76,10 +76,16 @@ class FLQuicProtocol(QuicConnectionProtocol):
         
         self._receive_buffers[stream_id].extend(data)
         
+        # CRITICAL FIX: Process messages immediately as they arrive,
+        # not just when stream ends. This handles end_stream=False case.
+        self._process_stream_buffer(stream_id)
+        
+        # Cleanup if stream is closing
         if end_stream:
-            self._process_stream_buffer(stream_id)
-            del self._receive_buffers[stream_id]
-            if stream_id in self._active_streams: del self._active_streams[stream_id]
+            if stream_id in self._receive_buffers:
+                del self._receive_buffers[stream_id]
+            if stream_id in self._active_streams:
+                del self._active_streams[stream_id]
     
     def _process_stream_buffer(self, stream_id: int) -> None:
         try:
@@ -205,7 +211,7 @@ ticket_handler = SessionTicketHandler()
 def create_quic_config(is_client: bool, cert_file=None, key_file=None, verify_mode=None, enable_0rtt=True, max_stream_data=10485760) -> QuicConfiguration:
     config = QuicConfiguration(is_client=is_client)
     config.max_datagram_frame_size = 65536
-    config.idle_timeout = 60.0
+    config.idle_timeout = 600.0  # Increased for long training sessions
     config.max_data = 104857600
     config.max_stream_data = max_stream_data
     config.alpn_protocols = ["fl-quic-v1"]
