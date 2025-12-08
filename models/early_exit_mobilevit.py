@@ -614,7 +614,7 @@ class TimmPretrainedEarlyExit(nn.Module):
         
         return final_logits, exit_indices
     
-    def count_parameters(self) -> Dict[str, int]:
+    def count_parameters(self) -> dict:
         """Count parameters per component."""
         return {
             'backbone': sum(p.numel() for p in self.backbone.parameters()),
