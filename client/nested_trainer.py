@@ -365,6 +365,8 @@ class NestedEarlyExitTrainer:
         learning_rate: float = 1e-3,
         fedprox_mu: float = 0.0,
         global_weights: Optional[List[np.ndarray]] = None,
+        use_scheduler: bool = True,
+        warmup_epochs: int = 5,
     ) -> Dict[str, float]:
         """
         Nested Learning training with multi-timescale optimization.
@@ -375,6 +377,8 @@ class NestedEarlyExitTrainer:
             learning_rate: Base learning rate (η_slow)
             fedprox_mu: FedProx regularization (applied to slow weights only)
             global_weights: Global model weights for FedProx
+            use_scheduler: Use Cosine Annealing + Warmup (MobileViT official)
+            warmup_epochs: Linear warmup epochs before cosine decay
             
         Returns:
             Training metrics
@@ -393,6 +397,25 @@ class NestedEarlyExitTrainer:
             lr=learning_rate,  # η_slow = 1x
             weight_decay=0.01,
         )
+        
+        # Cosine Annealing + Linear Warmup Scheduler (MobileViT official)
+        scheduler_fast = None
+        scheduler_slow = None
+        if use_scheduler and epochs > 1:
+            # LambdaLR with warmup + cosine decay
+            import math
+            def lr_lambda(current_epoch):
+                if current_epoch < warmup_epochs:
+                    # Linear warmup
+                    return float(current_epoch + 1) / float(warmup_epochs)
+                else:
+                    # Cosine annealing
+                    progress = float(current_epoch - warmup_epochs) / float(max(1, epochs - warmup_epochs))
+                    return 0.5 * (1.0 + math.cos(math.pi * progress))
+            
+            scheduler_fast = torch.optim.lr_scheduler.LambdaLR(optimizer_fast, lr_lambda)
+            scheduler_slow = torch.optim.lr_scheduler.LambdaLR(optimizer_slow, lr_lambda)
+            logger.info(f"Scheduler: Cosine + {warmup_epochs} warmup epochs")
         
         # Global weights for FedProx (only on slow weights)
         w_global_slow = None
@@ -519,6 +542,12 @@ class NestedEarlyExitTrainer:
                     'loss': f'{total_loss / total_samples:.4f}',
                     'acc': f'{100 * total_correct / total_samples:.1f}%'
                 })
+            
+            # Step schedulers at end of epoch
+            if scheduler_fast is not None:
+                scheduler_fast.step()
+            if scheduler_slow is not None:
+                scheduler_slow.step()
         
         metrics = {
             'loss': total_loss / max(total_samples, 1),
