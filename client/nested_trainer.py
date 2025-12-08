@@ -54,6 +54,7 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 import logging
 import gc
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -397,7 +398,14 @@ class NestedEarlyExitTrainer:
         step_counter = 0
         
         for epoch in range(epochs):
-            for images, labels in train_loader:
+            # Progress bar for batches
+            pbar = tqdm(
+                train_loader, 
+                desc=f"Epoch {epoch+1}/{epochs}",
+                leave=False,
+                ncols=100
+            )
+            for images, labels in pbar:
                 images = images.to(self.device, non_blocking=True)
                 labels = labels.to(self.device, non_blocking=True)
                 
@@ -492,6 +500,12 @@ class NestedEarlyExitTrainer:
                 total_loss += loss_fast.item() * labels.size(0)
                 total_correct += (y3.argmax(1) == labels).sum().item()
                 total_samples += labels.size(0)
+                
+                # Update progress bar
+                pbar.set_postfix({
+                    'loss': f'{total_loss / total_samples:.4f}',
+                    'acc': f'{100 * total_correct / total_samples:.1f}%'
+                })
         
         metrics = {
             'loss': total_loss / max(total_samples, 1),
