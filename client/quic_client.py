@@ -227,11 +227,28 @@ class FLQuicClient:
     async def _send_client_info(self) -> None:
         """Send client information to server"""
         try:
+            # Auto-detect device type
+            import torch
+            if torch.cuda.is_available():
+                device_name = torch.cuda.get_device_name(0)
+                # Map to device type
+                if 'RTX 4070' in device_name:
+                    device_type = 'rtx_4070'
+                elif 'RTX' in device_name or 'GTX' in device_name:
+                    device_type = 'nvidia_desktop'
+                elif 'Orin' in device_name or 'Jetson' in device_name:
+                    device_type = 'jetson'
+                else:
+                    device_type = device_name.replace(' ', '_').lower()
+            else:
+                device_type = 'cpu'
+            
             metadata = {
                 'client_id': self.client_id,
-                'device_type': 'jetson_nano',  # Or detect automatically
+                'device_type': device_type,
                 'capabilities': {
-                    'gpu': True,
+                    'gpu': torch.cuda.is_available(),
+                    'gpu_name': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
                     'max_batch_size': 32,
                 },
             }
@@ -240,7 +257,7 @@ class FLQuicClient:
                 logger.error("Protocol not initialized")
                 return
             self.protocol.send_metadata(metadata)
-            logger.info("Sent client info to server")
+            logger.info(f"Sent client info to server: device={device_type}")
             
         except Exception as e:
             logger.error(f"Failed to send client info: {e}")

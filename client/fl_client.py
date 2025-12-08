@@ -26,6 +26,7 @@ except ImportError:
     DataLoader = Any
 
 from .early_exit_trainer import EarlyExitTrainer, create_dummy_dataset
+from .nested_trainer import NestedEarlyExitTrainer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -157,10 +158,15 @@ def create_fl_client(
     Returns:
         Configured FLClient instance
     """
-    trainer = EarlyExitTrainer(
+    # Use NestedEarlyExitTrainer with full pretrained backbone
+    trainer = NestedEarlyExitTrainer(
         num_classes=num_classes,
         use_mixed_precision=use_mixed_precision,
+        use_self_distillation=True,
+        cms_enabled=True,
+        use_timm_pretrained=True,  # Full pretrained MobileViTv2
     )
+    logger.info(f"Created NestedEarlyExitTrainer for FL client")
     
     if train_loader is None:
         train_loader, dummy_test = create_dummy_dataset(
