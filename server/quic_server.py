@@ -336,28 +336,58 @@ class FLQuicServer:
         logger.info(f"FedDyn aggregation complete: {len(aggregated)} layers")
         return aggregated
     
-    async def _broadcast_global_model(self, weights: List[np.ndarray]) -> None:
+    async def _broadcast_global_model(self, weights: List[np.ndarray], sequential: bool = True) -> None:
         """
         Broadcast global model to all connected clients.
         
         Args:
             weights: Global model weights
+            sequential: If True, send to one client at a time and wait for update
         """
         logger.info(f"Broadcasting global model to {len(self.clients)} clients...")
         
-        successful = 0
-        for client_id, client in self.clients.items():
-            try:
-                # Send weights via QUIC
-                client.protocol.send_weights(weights)
-                client.current_round = self.current_round
-                client.is_training = True
-                successful += 1
-                
-            except Exception as e:
-                logger.error(f"Failed to send model to {client_id}: {e}")
-        
-        logger.info(f"Broadcast complete: {successful}/{len(self.clients)} successful")
+        if sequential:
+            # SEQUENTIAL: Train one client at a time (for single GPU)
+            logger.info("Using SEQUENTIAL mode (single GPU optimization)")
+            for client_id, client in self.clients.items():
+                try:
+                    logger.info(f"  → Sending model to {client_id}...")
+                    client.protocol.send_weights(weights)
+                    client.current_round = self.current_round
+                    client.is_training = True
+                    
+                    # Wait for this client's update before sending to next
+                    logger.info(f"  → Waiting for {client_id} to complete training...")
+                    timeout = 600  # 10 minutes per client
+                    start_wait = datetime.now()
+                    
+                    while client_id not in self.client_updates:
+                        await asyncio.sleep(1.0)
+                        elapsed = (datetime.now() - start_wait).total_seconds()
+                        if elapsed > timeout:
+                            logger.warning(f"  → Timeout waiting for {client_id}")
+                            break
+                    
+                    if client_id in self.client_updates:
+                        logger.info(f"  ✓ {client_id} completed training")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to send model to {client_id}: {e}")
+            
+            logger.info(f"Sequential broadcast complete: {len(self.client_updates)}/{len(self.clients)} received")
+        else:
+            # PARALLEL: Send to all at once (original behavior)
+            successful = 0
+            for client_id, client in self.clients.items():
+                try:
+                    client.protocol.send_weights(weights)
+                    client.current_round = self.current_round
+                    client.is_training = True
+                    successful += 1
+                except Exception as e:
+                    logger.error(f"Failed to send model to {client_id}: {e}")
+            
+            logger.info(f"Broadcast complete: {successful}/{len(self.clients)} successful")
     
     async def _run_training_round(self) -> None:
         """Execute a single FL training round"""

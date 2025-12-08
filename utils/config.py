@@ -75,7 +75,7 @@ class TrainingConfig:
     
     # Training
     local_epochs: int = 3
-    batch_size: int = 32
+    batch_size: int = 16  # Reduced for multi-client FL on single GPU
     num_workers: int = 2
     
     # Device
