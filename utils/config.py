@@ -74,7 +74,7 @@ class TrainingConfig:
     fedprox_mu: float = 0.01
     
     # Training
-    local_epochs: int = 3
+    local_epochs: int = 50  # Increased for early-exit model convergence
     batch_size: int = 16  # Reduced for multi-client FL on single GPU
     num_workers: int = 2
     
