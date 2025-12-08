@@ -294,6 +294,12 @@ class FLQuicClient:
             
             logger.info(f"Local training complete: {num_samples} samples, metrics={metrics}")
             
+            # FREE GPU MEMORY after training (important for sequential mode)
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logger.info("GPU memory released after training")
+            
             # Send update to server
             await self._send_update(updated_weights, num_samples, metrics)
             
@@ -354,28 +360,22 @@ class FLQuicClient:
             logger.info(f"Sending weights (Stream 4): {len(weights)} arrays...")
             self.protocol.send_weights(weights)
             
-            # Get connection stats after sending
-            bytes_sent_after = bytes_sent_before
-            bytes_received_after = bytes_received_before
-            try:
-                if self.protocol and hasattr(self.protocol, '_quic'):
-                    if hasattr(self.protocol._quic, '_loss') and hasattr(self.protocol._quic._loss, 'get_stats'):
-                        stats_after = self.protocol._quic._loss.get_stats()
-                        bytes_sent_after = getattr(stats_after, 'bytes_sent', bytes_sent_before)
-                        bytes_received_after = getattr(stats_after, 'bytes_received', bytes_received_before)
-            except Exception:
-                pass  # Stats not available, not critical
+            # Calculate actual bytes sent (from weight arrays)
+            # aioquic stats may not be available, so calculate from data
+            bytes_sent_weights = sum(w.nbytes for w in weights)
+            bytes_sent_metadata = len(str(metadata).encode())  # Approximate
+            total_bytes_sent = bytes_sent_weights + bytes_sent_metadata
             
-            # Update system metrics with deltas
+            # Update system metrics
             comm_metrics = self.system_metrics.update_communication(
-                bytes_sent=bytes_sent_after,
-                bytes_received=bytes_received_after
+                bytes_sent=total_bytes_sent,
+                bytes_received=0  # We received global model earlier
             )
             
             self.stats['updates_sent'] += 1
             logger.info(f"Update sent successfully: "
-                       f"Sent {SystemMetrics.format_bytes(comm_metrics['bytes_sent_delta'])}, "
-                       f"Received {SystemMetrics.format_bytes(comm_metrics['bytes_received_delta'])}")
+                       f"Sent {SystemMetrics.format_bytes(total_bytes_sent)} "
+                       f"({len(weights)} weight arrays)")
             
         except Exception as e:
             logger.error(f"Failed to send update: {e}")
