@@ -417,10 +417,17 @@ class FLQuicServer:
                     logger.info(f"  → Waiting for {client_id} to complete training...")
                     timeout = 600  # 10 minutes per client
                     start_wait = datetime.now()
+                    last_log = 0
                     
                     while client_id not in self.client_updates:
                         await asyncio.sleep(1.0)
                         elapsed = (datetime.now() - start_wait).total_seconds()
+                        
+                        # Log every 30s
+                        if int(elapsed) // 30 > last_log:
+                            last_log = int(elapsed) // 30
+                            logger.info(f"    ... {client_id} training ({int(elapsed)}s)")
+                        
                         if elapsed > timeout:
                             logger.warning(f"  → Timeout waiting for {client_id}")
                             break
