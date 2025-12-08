@@ -223,7 +223,7 @@ class NestedEarlyExitTrainer:
         device: str = "auto",
         use_mixed_precision: bool = True,
         use_self_distillation: bool = True,
-        distillation_weight: float = 0.5,
+        distillation_weight: float = 0.1,  # Reduced from 0.5 to prevent loss inflation
         distillation_temp: float = 3.0,
         # CMS (Continuum Memory System) settings
         cms_enabled: bool = True,
