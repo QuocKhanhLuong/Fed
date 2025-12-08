@@ -173,20 +173,29 @@ class FLQuicClient:
             # Establish QUIC connection
             # Fix: Use functools.partial to bind stream_handler to FLQuicProtocol constructor
             # aioquic will call this partial function with just the 'quic' argument
+            # FIX: Use lambda to properly bind stream_handler (partial doesn't work with aioquic)
+            handler = self.message_handler.handle_message
+            def create_protocol(quic):
+                return FLQuicProtocol(quic, stream_handler=handler)
+            
             async with connect(
                 host=self.server_host,
                 port=self.server_port,
                 configuration=config,
-                create_protocol=partial(FLQuicProtocol, stream_handler=self.message_handler.handle_message),
+                create_protocol=FLQuicProtocol,  # Just pass the class
             ) as client:
                 self.protocol = client
+                
+                # CRITICAL FIX: Set stream_handler AFTER connection
+                # aioquic doesn't respect kwargs in create_protocol factory
+                self.protocol._stream_handler = self.message_handler.handle_message
+                logger.info(f"Stream handler configured: {self.protocol._stream_handler is not None}")
                 
                 # Wait for handshake
                 if self.protocol is None:
                     logger.error("Protocol not initialized")
                     return False
                 
-                # ... (phần còn lại giữ nguyên) ...
                 connected = await self.protocol.wait_for_connection(timeout=10.0)
                 
                 if connected:
