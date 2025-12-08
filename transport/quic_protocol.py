@@ -46,6 +46,9 @@ class FLQuicProtocol(QuicConnectionProtocol):
             'bytes_sent': 0, 'bytes_received': 0, 'streams_created': 0,
             'messages_sent': 0, 'messages_received': 0,
         }
+        
+        # DEBUG: Log handler status at init
+        logger.info(f"FLQuicProtocol init: stream_handler={'SET' if stream_handler else 'NONE'}")
     
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, HandshakeCompleted):
