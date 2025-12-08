@@ -93,24 +93,23 @@ class FLQuicProtocol(QuicConnectionProtocol):
     def _process_stream_buffer(self, stream_id: int) -> None:
         try:
             buffer = self._receive_buffers[stream_id]
-            logger.info(f"Processing buffer stream {stream_id}: {len(buffer)} bytes")
             while len(buffer) > 0:
                 if len(buffer) < 5: 
-                    logger.debug(f"Buffer too small: {len(buffer)} < 5")
                     break
                 import struct
                 length = struct.unpack('>I', buffer[0:4])[0]
                 if len(buffer) < 5 + length: 
-                    logger.debug(f"Incomplete message: {len(buffer)} < {5+length}")
                     break
                 
                 msg_data = buffer[:5+length]
                 msg_type, payload = self._codec.decode_message(msg_data)
                 self._stats['messages_received'] += 1
-                logger.info(f"Decoded message: type={msg_type}, payload={len(payload)} bytes")
+                
+                # Concise log - type name and size in MB
+                msg_name = {1: "WEIGHTS", 2: "METADATA", 255: "ERROR"}.get(msg_type, f"TYPE_{msg_type}")
+                logger.info(f"Received {msg_name}: {len(payload)/1024/1024:.2f}MB")
                 
                 if self._stream_handler:
-                    logger.info(f"Creating task for stream_handler")
                     # Pass protocol reference for client identification
                     asyncio.create_task(self._stream_handler(stream_id, msg_type, payload, self))
                 else:

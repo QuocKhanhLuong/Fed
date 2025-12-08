@@ -57,13 +57,14 @@ class FLClientHandler(FLMessageHandler):
         self.client = client
         logger.info("FLClientHandler initialized")
     
-    async def handle_weights(self, stream_id: int, payload: bytes) -> None:
+    async def handle_weights(self, stream_id: int, payload: bytes, protocol = None) -> None:
         """
         Handle global model weights from server.
         
         Args:
             stream_id: Stream ID
             payload: Serialized weights
+            protocol: Protocol instance (optional)
         """
         try:
             # Deserialize weights
