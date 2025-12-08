@@ -135,19 +135,30 @@ class FedDynAggregator:
         # Step 2: Apply correction
         # w^{t+1} = w_avg - (1/α) · h^t
         w_new = []
+        correction_norms = []
         for w_j, h_j in zip(w_avg, self.h):
-            w_new.append(w_j - (1.0 / self.alpha) * h_j)
+            correction = (1.0 / self.alpha) * h_j
+            w_new.append(w_j - correction)
+            correction_norms.append(np.linalg.norm(correction))
+        
+        avg_correction = np.mean(correction_norms) if correction_norms else 0.0
+        logger.info(f"FedDyn Correction: avg_norm={avg_correction:.6f} (α={self.alpha})")
         
         # Step 3: Update correction term
         # h^{t+1} = h^t - α · (w^{t+1} - w_avg)
+        h_deltas = []
         for j in range(len(self.h)):
             delta = w_new[j] - w_avg[j]
-            self.h[j] = self.h[j] - self.alpha * delta
+            update = self.alpha * delta
+            self.h[j] = self.h[j] - update
+            h_deltas.append(np.linalg.norm(update))
+            
+        avg_h_update = np.mean(h_deltas) if h_deltas else 0.0
         
         # Logging
         n_total = sum(n for _, n in updates)
         h_norm = np.mean([np.linalg.norm(h) for h in self.h])
-        logger.info(f"FedDyn: n_total={n_total}, ||h||={h_norm:.6f}")
+        logger.info(f"FedDyn Stats: n_total={n_total}, ||h||={h_norm:.6f}, ||Δh||={avg_h_update:.6f}")
         
         return w_new
     
