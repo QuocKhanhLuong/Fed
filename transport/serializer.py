@@ -12,8 +12,19 @@ class ModelSerializer:
         self.enable_quantization = enable_quantization
         self.compression_level = compression_level
 
+    def _sanitize_array(self, array: np.ndarray) -> np.ndarray:
+        """Replace NaN/Inf with 0 to prevent quantization errors."""
+        if not np.isfinite(array).all():
+            num_bad = np.sum(~np.isfinite(array))
+            logger.warning(f"Sanitizing {num_bad} NaN/Inf values in array shape {array.shape}")
+            array = np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0)
+        return array
+
     def _quantize_array(self, array: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        if array.dtype != np.float32: array = array.astype(np.float32)
+        # Sanitize NaN/Inf first
+        array = self._sanitize_array(array)
+        if array.dtype != np.float32: 
+            array = array.astype(np.float32)
 
         if array.ndim == 4: 
             flattened = array.reshape(array.shape[0], -1)
@@ -38,11 +49,13 @@ class ModelSerializer:
 
     def serialize_weights(self, weights: List[np.ndarray]) -> bytes:
         serialized_list = []
-        for w in weights:
+        for i, w in enumerate(weights):
             if self.enable_quantization:
                 quant, scales = self._quantize_array(w)
                 serialized_list.append({'data': quant, 'scales': scales, 'shape': w.shape, 'q': True})
             else:
+                # Still sanitize even without quantization
+                w = self._sanitize_array(w)
                 serialized_list.append({'data': w, 'q': False})
         return lz4.frame.compress(pickle.dumps(serialized_list), compression_level=self.compression_level)
 

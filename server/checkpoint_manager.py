@@ -153,13 +153,13 @@ class CheckpointManager:
             logger.info(f"📦 Periodic checkpoint saved: round_{round_num}.npz")
         
         # Update metadata
-        self.metadata['best_accuracy'] = self.best_accuracy
-        self.metadata['best_round'] = self.best_round
-        self.metadata['total_rounds'] = round_num
+        self.metadata['best_accuracy'] = float(self.best_accuracy)
+        self.metadata['best_round'] = int(self.best_round)
+        self.metadata['total_rounds'] = int(round_num)
         self.metadata['checkpoints'].append({
-            'round': round_num,
-            'accuracy': accuracy,
-            'is_best': is_best,
+            'round': int(round_num),
+            'accuracy': float(accuracy),
+            'is_best': bool(is_best),  # Convert numpy bool to Python bool
         })
         self._save_metadata()
         
