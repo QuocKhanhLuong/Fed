@@ -127,6 +127,11 @@ class FLServerHandler(FLMessageHandler):
                 if 'num_samples' in metadata:
                     self.server.clients[client_id].num_samples = metadata['num_samples']
                 
+                # CRITICAL: Store metrics for accuracy/loss tracking
+                if 'metrics' in metadata:
+                    self.server.client_metrics[client_id] = metadata['metrics']
+                    logger.info(f"Stored metrics for {client_id}: acc={metadata['metrics'].get('accuracy', 'N/A')}")
+                
         except Exception as e:
             logger.error(f"Failed to handle metadata: {e}")
 

@@ -143,8 +143,30 @@ class FLEvaluator:
         )
         self.rounds.append(metrics)
         
-        logger.info(f"Round {round_num}: acc={global_accuracy:.4f}, "
-                   f"comm={self._format_bytes(bytes_sent + bytes_received)}")
+        # Enhanced per-round logging
+        comm_total = self._format_bytes(bytes_sent + bytes_received)
+        log_parts = [f"Round {round_num}: acc={global_accuracy:.4f}"]
+        
+        if global_loss > 0:
+            log_parts.append(f"loss={global_loss:.4f}")
+        
+        # Fairness: client accuracy variance
+        if client_accuracies and len(client_accuracies) > 1:
+            acc_std = np.std(client_accuracies)
+            acc_min = min(client_accuracies)
+            acc_max = max(client_accuracies)
+            log_parts.append(f"σ={acc_std:.4f}")
+            log_parts.append(f"range=[{acc_min:.2f},{acc_max:.2f}]")
+        
+        # Early exit distribution
+        if exit_distribution:
+            exit_str = "/".join([f"{e*100:.0f}%" for e in exit_distribution])
+            log_parts.append(f"exits=[{exit_str}]")
+        
+        log_parts.append(f"comm={comm_total}")
+        log_parts.append(f"time={round_time_s:.1f}s")
+        
+        logger.info(", ".join(log_parts))
     
     # =========================================================================
     # Table I: Model Performance
