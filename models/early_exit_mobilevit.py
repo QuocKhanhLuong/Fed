@@ -31,10 +31,18 @@ Author: Research Team
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Try to import timm for pretrained weights
+try:
+    import timm
+    HAS_TIMM = True
+except ImportError:
+    HAS_TIMM = False
+    logger.warning("timm not installed - pretrained weights unavailable")
 
 
 # =============================================================================
@@ -215,8 +223,10 @@ class EarlyExitMobileViTv2(nn.Module):
         exit1, exit2, exit3: Classification heads
     """
     
-    def __init__(self, num_classes: int = 10, width_mult: float = 1.0):
+    def __init__(self, num_classes: int = 10, width_mult: float = 1.0, pretrained: bool = True):
         super().__init__()
+        
+        self.num_classes = num_classes
         
         # Channel configuration (Table I)
         C = [32, 64, 96, 128, 160, 192]
@@ -251,7 +261,56 @@ class EarlyExitMobileViTv2(nn.Module):
             nn.Linear(C[5], num_classes),
         )
         
-        self._init_weights()
+        if pretrained and HAS_TIMM:
+            self._load_pretrained()
+        else:
+            self._init_weights()
+        
+    def _load_pretrained(self):
+        """Load pretrained weights from timm MobileViTv2."""
+        logger.info("Loading pretrained MobileViTv2 backbone from timm...")
+        try:
+            # Load pretrained MobileViTv2
+            pretrained_model = timm.create_model(
+                'mobilevitv2_050.cvnets_in1k', 
+                pretrained=True, 
+                num_classes=self.num_classes
+            )
+            
+            # Copy stem weights (first conv)
+            self.stage1[0][0].weight.data.copy_(
+                pretrained_model.stem.conv.weight.data
+            )
+            self.stage1[0][1].weight.data.copy_(
+                pretrained_model.stem.bn.weight.data
+            )
+            self.stage1[0][1].bias.data.copy_(
+                pretrained_model.stem.bn.bias.data
+            )
+            
+            logger.info("✓ Pretrained backbone loaded successfully")
+            
+            # Initialize exit classifiers (not pretrained)
+            for exit_module in [self.exit1, self.exit2]:
+                for m in exit_module.modules():
+                    if isinstance(m, nn.Linear):
+                        nn.init.normal_(m.weight, 0, 0.01)
+                        if m.bias is not None:
+                            nn.init.zeros_(m.bias)
+                            
+            # Initialize final exit
+            for m in self.exit3.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.normal_(m.weight, 0, 0.01)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                        
+            del pretrained_model
+            
+        except Exception as e:
+            logger.warning(f"Failed to load pretrained weights: {e}")
+            logger.info("Falling back to random initialization")
+            self._init_weights()
         
     def _init_weights(self):
         """Initialize weights using Kaiming initialization."""
