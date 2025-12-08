@@ -379,27 +379,37 @@ class FLQuicServer:
         if sequential:
             # SEQUENTIAL: Train one client at a time (for single GPU)
             logger.info("Using SEQUENTIAL mode (single GPU optimization)")
-            for client_id, client in self.clients.items():
+            client_list = list(self.clients.items())
+            logger.info(f"Client order: {[cid for cid, _ in client_list]}")
+            
+            for idx, (client_id, client) in enumerate(client_list):
                 try:
-                    logger.info(f"  → Sending model to {client_id}...")
+                    logger.info(f"  [{idx+1}/{len(client_list)}] Sending model to {client_id}...")
                     client.protocol.send_weights(weights)
                     client.current_round = self.current_round
                     client.is_training = True
                     
                     # Wait for this client's update before sending to next
-                    logger.info(f"  → Waiting for {client_id} to complete training...")
+                    logger.info(f"  [{idx+1}/{len(client_list)}] Waiting for {client_id} to complete training...")
                     timeout = 600  # 10 minutes per client
                     start_wait = datetime.now()
+                    last_progress_log = 0
                     
                     while client_id not in self.client_updates:
                         await asyncio.sleep(1.0)
                         elapsed = (datetime.now() - start_wait).total_seconds()
+                        
+                        # Log progress every 30 seconds
+                        if int(elapsed) // 30 > last_progress_log:
+                            last_progress_log = int(elapsed) // 30
+                            logger.info(f"    ... still waiting for {client_id} ({int(elapsed)}s elapsed, updates: {list(self.client_updates.keys())})")
+                        
                         if elapsed > timeout:
                             logger.warning(f"  → Timeout waiting for {client_id}")
                             break
                     
                     if client_id in self.client_updates:
-                        logger.info(f"  ✓ {client_id} completed training")
+                        logger.info(f"  ✓ [{idx+1}/{len(client_list)}] {client_id} completed training")
                     
                 except Exception as e:
                     logger.error(f"Failed to send model to {client_id}: {e}")
