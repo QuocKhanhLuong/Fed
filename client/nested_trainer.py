@@ -311,10 +311,15 @@ class NestedEarlyExitTrainer:
                           list(self.model.exit2.parameters()) + \
                           list(self.model.exit3.parameters())
         
-        # Slow: Backbone stages
-        self.slow_params = list(self.model.stage1.parameters()) + \
-                          list(self.model.stage2.parameters()) + \
-                          list(self.model.stage3.parameters())
+        # Slow: Backbone (handle both model types)
+        if hasattr(self.model, 'backbone'):
+            # TimmPretrainedEarlyExit uses 'backbone'
+            self.slow_params = list(self.model.backbone.parameters())
+        else:
+            # EarlyExitMobileViTv2 uses stage1, stage2, stage3
+            self.slow_params = list(self.model.stage1.parameters()) + \
+                              list(self.model.stage2.parameters()) + \
+                              list(self.model.stage3.parameters())
         
         logger.info(f"Parameter groups: Fast={len(self.fast_params)}, Slow={len(self.slow_params)}")
     
