@@ -283,10 +283,26 @@ class FLQuicServer:
         Returns:
             Client ID or None
         """
-        # This is a simplified version - in production, maintain stream->client mapping
+        # Check multiple data structures to find the client
         for client_id, client in self.clients.items():
+            # Check active_streams (server-initiated)
             if stream_id in client.protocol._active_streams:
                 return client_id
+            # Check receive_buffers (client-initiated streams)
+            if stream_id in client.protocol._receive_buffers:
+                return client_id
+            # Check if this stream belongs to the client's QUIC connection
+            # by checking if any stream_id from same connection (even IDs from client)
+            # Note: QUIC stream IDs - even IDs are client-initiated, odd are server-initiated
+            # Streams on same connection will share the same protocol
+            if hasattr(client.protocol, '_quic'):
+                # Any stream on this connection belongs to this client
+                try:
+                    # Check if stream exists on this connection
+                    if stream_id in client.protocol._quic._streams:
+                        return client_id
+                except:
+                    pass
         return None
     
     async def _receive_client_update(self, client_id: str, weights: List[np.ndarray]) -> None:
