@@ -38,6 +38,7 @@ from transport.serializer import ModelSerializer
 from transport.quic_metrics import QUICMetrics
 from server.aggregators import create_aggregator, BaseAggregator
 from server.checkpoint_manager import CheckpointManager
+from server.client_state_manager import create_client_manager, ClientProxy
 from evaluation import FLEvaluator, ExperimentConfig
 
 logging.basicConfig(
@@ -194,8 +195,7 @@ class FLQuicServer:
             'start_time': None,
         }
         
-        # Redis Client Manager
-        from .client_state_manager import create_client_manager, ClientProxy
+        # Flower-compatible Client Manager (auto-selects Redis or InMemory)
         self.client_manager = create_client_manager(backend="auto")
         
         # Aggregation Strategy (FedAvg, FedProx, or FedDyn)
