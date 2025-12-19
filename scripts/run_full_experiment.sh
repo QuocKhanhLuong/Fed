@@ -14,6 +14,14 @@
 
 set -e
 
+# Get the project root directory (parent of scripts/)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Change to project root
+cd "$PROJECT_ROOT"
+echo "Working directory: $(pwd)"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -28,7 +36,7 @@ LOCAL_EPOCHS=100
 DATASET="cifar100"
 ALPHA=0.3
 SERVER_PORT=4433
-LOG_DIR="./logs/experiment_$(date +%Y%m%d_%H%M%S)"
+LOG_DIR="$PROJECT_ROOT/logs/experiment_$(date +%Y%m%d_%H%M%S)"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
