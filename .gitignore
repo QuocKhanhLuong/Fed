@@ -80,3 +80,5 @@ wandb/
 *.tmp
 *.bak
 *.log
+
+paper/

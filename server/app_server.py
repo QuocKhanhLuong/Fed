@@ -220,8 +220,8 @@ if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════════════════════╗
 ║                                                          ║
-║   FL-QUIC-LoRA Federated Learning Server                ║
-║   Accelerating FL on Edge Devices via QUIC & LoRA       ║
+║   FL-QUIC-LoRA Federated Learning Server                 ║
+║   Accelerating FL on Edge Devices via QUIC & LoRA        ║
 ║                                                          ║
 ╚══════════════════════════════════════════════════════════╝
     """)

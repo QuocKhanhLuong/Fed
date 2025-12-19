@@ -213,27 +213,57 @@ class FedDynAggregator(BaseAggregator):
     Reference: Acar et al., "Federated Learning Based on Dynamic Regularization",
                ICLR 2021
     
-    Key innovation:
-        - Server maintains gradient correction term h
-        - Helps with non-IID data convergence
+    Algorithm 2: FedDyn Server Update
+    ─────────────────────────────────
+    Input: Client updates {(w_i, n_i)}_{i=1}^{m}, global weights w^t, 
+           correction term h^t, regularization α
     
-    Algorithm:
-        Server:
-            h^t+1 = h^t - α(w^t+1 - w^t)
-            
-        Client local objective:
-            h_k(w) = F_k(w) - <∇_k, w> + (α/2)||w - w^t||^2
+    1. w_avg ← Σ(n_i/n) · w_i          # Weighted average
+    2. w^{t+1} ← w_avg - (1/α) · h^t   # Apply correction
+    3. h^{t+1} ← h^t - α(w^{t+1} - w^t)  # Update correction based on GLOBAL CHANGE
+    
+    Output: w^{t+1}
+    
+    Key Innovation:
+        - h tracks the cumulative drift between consecutive global models
+        - This drift is caused by non-IID data across clients
+        - The correction term compensates for this drift
     """
     
-    def __init__(self, alpha: float = 0.01):
+    def __init__(self, alpha: float = 0.01, debug: bool = False):
         """
         Args:
             alpha: Regularization strength (0.01 recommended)
+            debug: Enable detailed debug logging
         """
         super().__init__("FedDyn")
         self.alpha = alpha
-        self.h: Optional[List[np.ndarray]] = None  # Gradient correction
-        logger.info(f"FedDynAggregator initialized: α={alpha}")
+        self.debug = debug
+        self.h: Optional[List[np.ndarray]] = None  # Gradient correction term
+        self.w_prev: Optional[List[np.ndarray]] = None  # Previous global weights
+        logger.info(f"FedDynAggregator initialized: α={alpha}, debug={debug}")
+    
+    def _weighted_average(
+        self, 
+        client_updates: Dict[str, Tuple[List[np.ndarray], int]]
+    ) -> Tuple[List[np.ndarray], int]:
+        """
+        Compute weighted average of client updates.
+        
+        Implements: w_avg = Σ(n_i/n) · w_i
+        """
+        total_samples = sum(num for _, num in client_updates.values())
+        first_weights = list(client_updates.values())[0][0]
+        num_layers = len(first_weights)
+        
+        w_avg = [np.zeros_like(w, dtype=np.float32) for w in first_weights]
+        
+        for client_id, (weights, num_samples) in client_updates.items():
+            coef = num_samples / total_samples
+            for i, w in enumerate(weights):
+                w_avg[i] += w.astype(np.float32) * coef
+        
+        return w_avg, total_samples
     
     def aggregate(
         self,
@@ -242,48 +272,125 @@ class FedDynAggregator(BaseAggregator):
     ) -> List[np.ndarray]:
         """
         FedDyn aggregation with gradient correction.
+        
+        Implements Algorithm 2 from the paper.
+        
+        Note: global_weights parameter is optional. If not provided, we use
+              self.w_prev which tracks the previous round's output.
         """
         if not client_updates:
             raise ValueError("No client updates to aggregate")
         
-        # Weighted average (same as FedAvg)
-        total_samples = sum(num for _, num in client_updates.values())
-        first_weights = list(client_updates.values())[0][0]
-        num_layers = len(first_weights)
-        aggregated = [np.zeros_like(w) for w in first_weights]
+        m = len(client_updates)
         
-        for client_id, (weights, num_samples) in client_updates.items():
-            weight = num_samples / total_samples
-            for i in range(num_layers):
-                aggregated[i] += weight * weights[i]
+        # ═══════════════════════════════════════════════════════════════════
+        # Step 1: Weighted Average (same as FedAvg)
+        # ═══════════════════════════════════════════════════════════════════
+        w_avg, total_samples = self._weighted_average(client_updates)
+        num_layers = len(w_avg)
         
-        # Initialize h if needed
+        if self.debug:
+            avg_norms = [np.linalg.norm(w) for w in w_avg]
+            logger.info(f"[DEBUG] Step 1 - w_avg norms: mean={np.mean(avg_norms):.6f}")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # Initialize h and w_prev on first round
+        # ═══════════════════════════════════════════════════════════════════
         if self.h is None:
-            self.h = [np.zeros_like(w) for w in aggregated]
+            self.h = [np.zeros_like(w, dtype=np.float32) for w in w_avg]
+            logger.info(f"Initialized h with {num_layers} parameter arrays")
         
-        # Apply gradient correction: w_corrected = w_avg - (1/α) * h
-        if global_weights is not None:
-            corrected = []
-            for i in range(num_layers):
-                corrected_w = aggregated[i] - (1.0 / self.alpha) * self.h[i]
-                corrected.append(corrected_w)
-            
-            # Update h: h = h - α * (w_new - w_old)
-            for i in range(num_layers):
-                self.h[i] = self.h[i] - self.alpha * (corrected[i] - global_weights[i])
-            
-            aggregated = corrected
+        if self.w_prev is None:
+            # First round: no previous weights, use w_avg as baseline
+            self.w_prev = [w.copy() for w in w_avg]
+            logger.info(f"Initialized w_prev (first round baseline)")
         
-        logger.info(f"FedDyn: Aggregated {len(client_updates)} clients "
-                   f"with gradient correction (α={self.alpha})")
+        # ═══════════════════════════════════════════════════════════════════
+        # Step 2: Apply Correction
+        # w^{t+1} = w_avg - (1/α) · h^t
+        # ═══════════════════════════════════════════════════════════════════
+        w_new = []
+        correction_norms = []
+        
+        for w_j, h_j in zip(w_avg, self.h):
+            correction = (1.0 / self.alpha) * h_j
+            w_new.append(w_j - correction)
+            correction_norms.append(np.linalg.norm(correction))
+        
+        avg_correction = np.mean(correction_norms) if correction_norms else 0.0
+        
+        if self.debug:
+            logger.info(f"[DEBUG] Step 2 - Correction: avg_norm={avg_correction:.6f}")
+            new_norms = [np.linalg.norm(w) for w in w_new]
+            logger.info(f"[DEBUG] Step 2 - w_new norms: mean={np.mean(new_norms):.6f}")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # Step 3: Update Correction Term (CRITICAL FIX)
+        # h^{t+1} = h^t - α · (w^{t+1} - w^t)
+        # 
+        # Where w^t = w_prev (previous global model, NOT w_avg!)
+        # This tracks the drift between consecutive global models
+        # ═══════════════════════════════════════════════════════════════════
+        h_deltas = []
+        for j in range(num_layers):
+            # Use w_prev (previous global), not w_avg!
+            delta = w_new[j] - self.w_prev[j]
+            h_update = self.alpha * delta
+            self.h[j] = self.h[j] - h_update
+            h_deltas.append(np.linalg.norm(h_update))
+        
+        avg_h_update = np.mean(h_deltas) if h_deltas else 0.0
+        h_norm = np.mean([np.linalg.norm(h) for h in self.h])
+        
+        if self.debug:
+            logger.info(f"[DEBUG] Step 3 - h update: ||Δh||={avg_h_update:.6f}, ||h||={h_norm:.6f}")
+            # Show delta from previous global
+            delta_norms = [np.linalg.norm(w_new[j] - self.w_prev[j]) for j in range(num_layers)]
+            logger.info(f"[DEBUG] Step 3 - ||w_new - w_prev||: mean={np.mean(delta_norms):.6f}")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # Update w_prev for next round
+        # ═══════════════════════════════════════════════════════════════════
+        self.w_prev = [w.copy() for w in w_new]
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # Summary Logging
+        # ═══════════════════════════════════════════════════════════════════
+        logger.info(
+            f"FedDyn Round {self.round_num + 1}: "
+            f"m={m} clients, n={total_samples} samples, "
+            f"||correction||={avg_correction:.4f}, ||h||={h_norm:.4f}"
+        )
         
         self.on_round_end()
-        return aggregated
+        return w_new
+    
+    def get_debug_stats(self) -> Dict[str, float]:
+        """Get current FedDyn state for debugging."""
+        if self.h is None:
+            return {"h_norm": 0.0, "h_layers": 0, "round": self.round_num}
+        
+        h_norms = [np.linalg.norm(h) for h in self.h]
+        return {
+            "h_norm_mean": float(np.mean(h_norms)),
+            "h_norm_max": float(np.max(h_norms)),
+            "h_norm_min": float(np.min(h_norms)),
+            "h_layers": len(self.h),
+            "round": self.round_num,
+            "alpha": self.alpha,
+            "has_w_prev": self.w_prev is not None
+        }
     
     def reset(self):
-        """Reset gradient correction term."""
+        """Reset gradient correction term and previous weights."""
         self.h = None
+        self.w_prev = None
         self.round_num = 0
+        logger.info("FedDynAggregator reset")
+
+
+
+
 
 
 # =============================================================================

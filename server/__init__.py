@@ -1,5 +1,20 @@
 """Server components for FL-QUIC system"""
 
-from .quic_server import FLQuicServer
+# Lazy imports to avoid aioquic dependency when not needed
+from .aggregators import (
+    FedAvgAggregator,
+    FedProxAggregator, 
+    FedDynAggregator,
+    NestedFedDynAggregator,
+    create_aggregator,
+)
 
-__all__ = ['FLQuicServer']
+__all__ = [
+    'FedAvgAggregator',
+    'FedProxAggregator',
+    'FedDynAggregator', 
+    'NestedFedDynAggregator',
+    'create_aggregator',
+]
+
+from .quic_server import FLQuicServer
