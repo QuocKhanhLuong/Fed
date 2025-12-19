@@ -195,8 +195,8 @@ class FLQuicServer:
         }
         
         # Redis Client Manager
-        from .redis_client_manager import RedisClientManager
-        self.client_manager = RedisClientManager()
+        from .client_state_manager import create_client_manager, ClientProxy
+        self.client_manager = create_client_manager(backend="auto")
         
         # Aggregation Strategy (FedAvg, FedProx, or FedDyn)
         self.strategy = strategy
@@ -260,13 +260,16 @@ class FLQuicServer:
         )
         self.clients[client_id] = client_state
         
-        # Register client in Redis
-        metadata = {
-            'address': str(remote_addr),
-            'connected_at': str(datetime.now()),
-            'status': 'connected'
-        }
-        self.client_manager.register_client(client_id, metadata)
+        # Register client using Flower-compatible ClientProxy
+        client_proxy = ClientProxy(
+            cid=client_id,
+            metadata={
+                'address': str(remote_addr),
+                'connected_at': str(datetime.now()),
+                'status': 'connected'
+            }
+        )
+        self.client_manager.register(client_proxy)
         self.stats['total_clients_connected'] += 1
         
         # Record QUIC connection metrics
