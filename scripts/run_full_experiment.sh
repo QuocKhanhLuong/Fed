@@ -151,6 +151,32 @@ fi
 echo ""
 
 #===============================================================================
+# Step 1.5: Check/Start Redis (optional but recommended)
+#===============================================================================
+echo -e "${BLUE}Checking Redis...${NC}"
+if command -v redis-cli &> /dev/null; then
+    if redis-cli ping &> /dev/null; then
+        echo -e "${GREEN}✓ Redis is running${NC}"
+    else
+        echo -e "${YELLOW}Starting Redis server...${NC}"
+        if command -v redis-server &> /dev/null; then
+            redis-server --daemonize yes --port 6379 2>/dev/null || true
+            sleep 1
+            if redis-cli ping &> /dev/null; then
+                echo -e "${GREEN}✓ Redis started${NC}"
+            else
+                echo -e "${YELLOW}⚠ Redis failed to start - using in-memory fallback${NC}"
+            fi
+        else
+            echo -e "${YELLOW}⚠ redis-server not found - using in-memory fallback${NC}"
+        fi
+    fi
+else
+    echo -e "${YELLOW}⚠ redis-cli not found - using in-memory fallback (OK for testing)${NC}"
+fi
+echo ""
+
+#===============================================================================
 # Step 2: Start Server
 #===============================================================================
 echo -e "${BLUE}Starting FL Server...${NC}"
