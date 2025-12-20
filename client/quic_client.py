@@ -171,25 +171,29 @@ class FLQuicClient:
             
             logger.info(f"Connecting to {self.server_host}:{self.server_port}...")
             
-            # Establish QUIC connection
-            # Fix: Use functools.partial to bind stream_handler to FLQuicProtocol constructor
-            # aioquic will call this partial function with just the 'quic' argument
-            # FIX: Use lambda to properly bind stream_handler (partial doesn't work with aioquic)
+            # CRITICAL FIX: Use a proper factory function that binds stream_handler
+            # The lambda captures self.message_handler.handle_message
             handler = self.message_handler.handle_message
-            def create_protocol(quic):
-                return FLQuicProtocol(quic, stream_handler=handler)
+            
+            def create_protocol_factory(quic):
+                """Factory that creates FLQuicProtocol with stream_handler bound."""
+                protocol = FLQuicProtocol(quic, stream_handler=handler)
+                logger.info(f"Protocol created with stream_handler: {protocol._stream_handler is not None}")
+                return protocol
             
             async with connect(
                 host=self.server_host,
                 port=self.server_port,
                 configuration=config,
-                create_protocol=FLQuicProtocol,  # Just pass the class
+                create_protocol=create_protocol_factory,  # Use factory with handler
             ) as client:
                 self.protocol = client
                 
-                # CRITICAL FIX: Set stream_handler AFTER connection
-                # aioquic doesn't respect kwargs in create_protocol factory
-                self.protocol._stream_handler = self.message_handler.handle_message
+                # Double-check handler is set (defensive)
+                if self.protocol._stream_handler is None:
+                    logger.warning("stream_handler was None, re-setting...")
+                    self.protocol._stream_handler = handler
+                
                 logger.info(f"Stream handler configured: {self.protocol._stream_handler is not None}")
                 
                 # Wait for handshake
@@ -216,6 +220,8 @@ class FLQuicClient:
             
         except Exception as e:
             logger.error(f"Connection failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def _create_protocol(self, quic: QuicConnection) -> FLQuicProtocol:
