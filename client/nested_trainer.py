@@ -63,7 +63,171 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Continuum Memory System (Google Nested Learning, NeurIPS 2025)
+# Feature 1: Local Surprise Signal (LSS) - NeurIPS 2025
+# =============================================================================
+
+class LocalSurpriseSignal:
+    """
+    Local Surprise Signal (LSS) from Nested Learning.
+    
+    LSS measures how "surprising" each sample is to the model, allowing
+    the training to focus on difficult/informative samples.
+    
+    Formula: LSS(x) = loss(x) / E[loss] (normalized per-sample loss)
+    
+    This implements importance sampling where harder samples get more weight.
+    
+    Reference: "Nested Learning" (Google Research, NeurIPS 2025)
+    """
+    
+    def __init__(
+        self,
+        enabled: bool = True,
+        temperature: float = 1.0,
+        ema_decay: float = 0.99,
+    ):
+        """
+        Args:
+            enabled: Whether LSS is active
+            temperature: Controls sharpness of weighting (higher = more uniform)
+            ema_decay: Decay for running mean loss estimation
+        """
+        self.enabled = enabled
+        self.temperature = temperature
+        self.ema_decay = ema_decay
+        self.running_mean_loss = None
+        
+    def compute_weights(
+        self,
+        per_sample_loss: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute sample weights based on surprise signal.
+        
+        Args:
+            per_sample_loss: Loss per sample (batch_size,)
+            
+        Returns:
+            Sample weights (batch_size,) - higher weight for surprising samples
+        """
+        if not self.enabled:
+            return torch.ones_like(per_sample_loss)
+        
+        # Update running mean
+        batch_mean = per_sample_loss.mean().detach()
+        if self.running_mean_loss is None:
+            self.running_mean_loss = batch_mean
+        else:
+            self.running_mean_loss = (
+                self.ema_decay * self.running_mean_loss + 
+                (1 - self.ema_decay) * batch_mean
+            )
+        
+        # Compute normalized surprise (LSS)
+        # Higher loss = more surprising = higher weight
+        lss = per_sample_loss / (self.running_mean_loss + 1e-8)
+        
+        # Apply temperature and normalize
+        weights = torch.softmax(lss / self.temperature, dim=0) * len(lss)
+        
+        return weights.detach()
+    
+    def get_stats(self) -> Dict[str, float]:
+        """Get LSS statistics."""
+        return {
+            'lss_running_mean': self.running_mean_loss.item() if self.running_mean_loss is not None else 0.0,
+        }
+
+
+# =============================================================================
+# Feature 2: Deep Momentum GD (DMGD) - NeurIPS 2025
+# =============================================================================
+
+class DeepMomentum(nn.Module):
+    """
+    Deep Momentum using MLP instead of EMA.
+    
+    Standard momentum: m_t = β*m_{t-1} + g_t
+    Deep momentum: m_t = MLP(concat(m_{t-1}, g_t))
+    
+    This allows the optimizer to learn non-linear gradient aggregation,
+    potentially capturing higher-order optimization dynamics.
+    
+    Reference: "Nested Learning" (Google Research, NeurIPS 2025)
+    """
+    
+    def __init__(
+        self,
+        param_dim: int,
+        hidden_dim: int = 64,
+        num_layers: int = 2,
+    ):
+        """
+        Args:
+            param_dim: Dimension of gradient/momentum vectors
+            hidden_dim: Hidden layer dimension
+            num_layers: Number of MLP layers
+        """
+        super().__init__()
+        
+        # Small MLP for momentum transformation
+        layers = []
+        input_dim = param_dim * 2  # concat(momentum, gradient)
+        
+        for i in range(num_layers - 1):
+            layers.extend([
+                nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.GELU(),
+            ])
+        
+        layers.append(nn.Linear(hidden_dim, param_dim))
+        
+        self.net = nn.Sequential(*layers)
+        
+        # Initialize to behave like standard momentum initially
+        self._init_as_momentum()
+        
+        # Momentum buffer
+        self.register_buffer('momentum', None)
+        
+    def _init_as_momentum(self):
+        """Initialize MLP to approximate standard momentum."""
+        with torch.no_grad():
+            for module in self.net.modules():
+                if isinstance(module, nn.Linear):
+                    nn.init.zeros_(module.weight)
+                    nn.init.zeros_(module.bias)
+    
+    def forward(self, gradient: torch.Tensor, beta: float = 0.9) -> torch.Tensor:
+        """
+        Apply deep momentum to gradient.
+        
+        Args:
+            gradient: Current gradient (flattened)
+            beta: Momentum coefficient (for fallback)
+            
+        Returns:
+            Updated momentum vector
+        """
+        if self.momentum is None:
+            self.momentum = torch.zeros_like(gradient)
+        
+        # Fallback to standard momentum for stability
+        standard_momentum = beta * self.momentum + gradient
+        
+        # Deep momentum: learn residual correction
+        combined = torch.cat([self.momentum, gradient], dim=-1)
+        correction = self.net(combined.unsqueeze(0)).squeeze(0)
+        
+        # Combine standard + learned correction (with small weight)
+        self.momentum = standard_momentum + 0.1 * correction
+        
+        return self.momentum
+
+
+# =============================================================================
+# Feature 3: Extended Continuum Memory System - NeurIPS 2025
 # =============================================================================
 
 class ContinuumMemorySystem(nn.Module):
@@ -73,13 +237,13 @@ class ContinuumMemorySystem(nn.Module):
     Instead of binary short/long-term memory, CMS uses a SPECTRUM
     of memory modules, each updating at different frequencies.
     
-    Memory Levels:
-    - Fast (τ=1):   Update every step - immediate context
-    - Medium (τ=5): Update every 5 steps - recent patterns
-    - Slow (τ=25):  Update every 25 steps - long-term knowledge
+    Memory Levels (Extended to 4+):
+    - Fast (τ=1):    Update every step - immediate context
+    - Medium (τ=5):  Update every 5 steps - recent patterns
+    - Slow (τ=25):   Update every 25 steps - medium-term
+    - Anchor (τ=125): Update every 125 steps - long-term knowledge
     
     Memory Budget: O(1) - Fixed size, no growth over FL rounds!
-    Total overhead: 3 × backbone_size ≈ 30 MB
     
     Reference: "Nested Learning" (Google Research, NeurIPS 2025)
     """
@@ -87,31 +251,51 @@ class ContinuumMemorySystem(nn.Module):
     def __init__(
         self,
         enabled: bool = True,
-        update_freqs: List[int] = [1, 5, 25],
-        decay_rates: List[float] = [0.0, 0.9, 0.99],
-        memory_weight: float = 0.001,  # Reduced from 0.01 to prevent gradient explosion
+        update_freqs: List[int] = None,
+        decay_rates: List[float] = None,
+        memory_weight: float = 0.001,
+        num_levels: int = 4,
+        base_freq: int = 5,
     ):
         """
         Args:
             enabled: Whether CMS is active
-            update_freqs: Update frequency for each memory level [fast, medium, slow]
-            decay_rates: EMA decay for each level (0 = no memory, 1 = static)
+            update_freqs: Update frequency for each memory level
+            decay_rates: EMA decay for each level
             memory_weight: Weight of memory regularization loss
+            num_levels: Number of memory levels (default: 4)
+            base_freq: Base for exponential frequency spacing
         """
         super().__init__()
         self.enabled = enabled
+        self.memory_weight = memory_weight
+        
+        # Auto-generate exponential frequencies if not provided
+        if update_freqs is None:
+            update_freqs = self.create_exponential_levels(base_freq, num_levels)
+        if decay_rates is None:
+            # Decay increases with level (slower update = more decay)
+            decay_rates = [1 - 1.0 / (i + 1) for i in range(len(update_freqs))]
+            decay_rates[0] = 0.0  # Fast level has no memory decay
+        
         self.update_freqs = update_freqs
         self.decay_rates = decay_rates
-        self.memory_weight = memory_weight
         self.num_levels = len(update_freqs)
         
         # Memory buffers (initialized on first use)
         self.memories: List[Optional[torch.Tensor]] = [None] * self.num_levels
+        # Gradient accumulators per level
+        self.grad_accumulators: List[Optional[torch.Tensor]] = [None] * self.num_levels
         self._initialized = False
         
         logger.info(f"CMS initialized: enabled={enabled}, levels={self.num_levels}")
         logger.info(f"  Update freqs: {update_freqs}")
-        logger.info(f"  Decay rates: {decay_rates}")
+        logger.info(f"  Decay rates: {[f'{d:.2f}' for d in decay_rates]}")
+    
+    @staticmethod
+    def create_exponential_levels(base: int = 5, num_levels: int = 4) -> List[int]:
+        """Create exponentially spaced update frequencies."""
+        return [base ** i for i in range(num_levels)]  # [1, 5, 25, 125]
     
     def _initialize_memories(self, template: torch.Tensor):
         """Initialize memory buffers from template tensor."""
@@ -119,17 +303,19 @@ class ContinuumMemorySystem(nn.Module):
             return
         for i in range(self.num_levels):
             self.memories[i] = template.detach().clone()
+            self.grad_accumulators[i] = torch.zeros_like(template)
         self._initialized = True
         logger.info(f"CMS memories initialized: {template.numel():,} params × {self.num_levels} levels")
     
     @torch.no_grad()
-    def update(self, weights: torch.Tensor, step: int):
+    def update(self, weights: torch.Tensor, step: int, gradient: torch.Tensor = None):
         """
         Update memory buffers based on current step.
         
         Args:
             weights: Current slow (backbone) weights as flat tensor
             step: Current training step
+            gradient: Optional gradient for accumulation
         """
         if not self.enabled:
             return
@@ -138,12 +324,19 @@ class ContinuumMemorySystem(nn.Module):
         if not self._initialized:
             self._initialize_memories(weights)
         
+        # Accumulate gradients for each level
+        if gradient is not None:
+            for i in range(self.num_levels):
+                self.grad_accumulators[i] += gradient
+        
         # Update each memory level based on its frequency
         for i, (freq, decay) in enumerate(zip(self.update_freqs, self.decay_rates)):
             if step % freq == 0:
                 # EMA update: m = α*m + (1-α)*w
                 self.memories[i] = decay * self.memories[i] + (1 - decay) * weights.detach()
-    
+                # Reset gradient accumulator for this level
+                if self.grad_accumulators[i] is not None:
+                    self.grad_accumulators[i].zero_()
     def get_memory_loss(self, current_weights: torch.Tensor) -> torch.Tensor:
         """
         Compute memory regularization loss.
@@ -162,7 +355,7 @@ class ContinuumMemorySystem(nn.Module):
         for i, mem in enumerate(self.memories):
             if mem is not None:
                 # Slower memories (higher index) have higher weight
-                level_weight = (i + 1) / self.num_levels  # 0.33, 0.67, 1.0
+                level_weight = (i + 1) / self.num_levels
                 loss = loss + level_weight * F.mse_loss(current_weights, mem)
         
         return self.memory_weight * loss
@@ -221,19 +414,25 @@ class NestedEarlyExitTrainer:
         self,
         num_classes: int = 10,
         exit_weights: List[float] = [0.3, 0.3, 0.4],
-        fast_lr_multiplier: float = 3.0,  # Reduced from 10.0 to prevent NaN
+        fast_lr_multiplier: float = 3.0,
         slow_update_freq: int = 5,
         device: str = "auto",
         use_mixed_precision: bool = True,
         use_self_distillation: bool = True,
-        distillation_weight: float = 0.1,  # Reduced from 0.5 to prevent loss inflation
+        distillation_weight: float = 0.1,
         distillation_temp: float = 3.0,
         # CMS (Continuum Memory System) settings
         cms_enabled: bool = True,
-        cms_update_freqs: List[int] = [1, 5, 25],
-        cms_decay_rates: List[float] = [0.0, 0.9, 0.99],
-        cms_weight: float = 0.001,  # Reduced to prevent gradient explosion
-        # NEW: Use full pretrained backbone from timm
+        cms_update_freqs: List[int] = None,  # Auto-generate if None
+        cms_decay_rates: List[float] = None,
+        cms_weight: float = 0.001,
+        cms_num_levels: int = 4,  # NEW: Extended from 3 to 4
+        # NEW: Local Surprise Signal (LSS)
+        use_lss: bool = True,
+        lss_temperature: float = 1.0,
+        # NEW: Deep Momentum GD (not enabled by default due to overhead)
+        use_deep_momentum: bool = False,
+        # Use full pretrained backbone from timm
         use_timm_pretrained: bool = True,
     ):
         # Device selection
@@ -273,13 +472,25 @@ class NestedEarlyExitTrainer:
         # Separate parameter groups
         self._setup_parameter_groups()
         
-        # Continuum Memory System (Google Nested Learning)
+        # Continuum Memory System (Google Nested Learning) - Extended to N levels
         self.cms = ContinuumMemorySystem(
             enabled=cms_enabled,
             update_freqs=cms_update_freqs,
             decay_rates=cms_decay_rates,
             memory_weight=cms_weight,
+            num_levels=cms_num_levels,
         )
+        
+        # NEW: Local Surprise Signal (LSS) for sample importance weighting
+        self.lss = LocalSurpriseSignal(
+            enabled=use_lss,
+            temperature=lss_temperature,
+        )
+        self.use_lss = use_lss
+        
+        # NEW: Deep Momentum (disabled by default)
+        self.use_deep_momentum = use_deep_momentum
+        self.deep_momentum = None  # Initialized lazily if enabled
         
         # Statistics
         self.stats = {
@@ -289,13 +500,17 @@ class NestedEarlyExitTrainer:
             'fast_lr_multiplier': fast_lr_multiplier,
             'slow_update_freq': slow_update_freq,
             'cms_enabled': cms_enabled,
+            'cms_levels': cms_num_levels,
+            'lss_enabled': use_lss,
+            'dmgd_enabled': use_deep_momentum,
         }
         
         logger.info(f"NestedEarlyExitTrainer: device={self.device}")
         logger.info(f"Fast params: {self.stats['fast_params']:,} | "
                     f"Slow params: {self.stats['slow_params']:,}")
         logger.info(f"Fast LR: {fast_lr_multiplier}x | Slow update: every {slow_update_freq} steps")
-        logger.info(f"CMS: enabled={cms_enabled}, levels={len(cms_update_freqs)}")
+        logger.info(f"CMS: enabled={cms_enabled}, levels={cms_num_levels}")
+        logger.info(f"LSS: enabled={use_lss} | DMGD: enabled={use_deep_momentum}")
     
     def _setup_parameter_groups(self):
         """
