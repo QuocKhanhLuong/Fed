@@ -1,81 +1,79 @@
-# Early-Exit Federated Learning with QUIC Transport
+# Nested Early-Exit Federated Learning
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
+[![PyTorch 1.10+](https://img.shields.io/badge/PyTorch-1.10+-ee4c2c.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## 🎯 Overview
 
-**Difficulty-Aware Federated Learning with Early-Exit Networks**
+**Difficulty-Aware Federated Learning with Nested Early-Exit Networks**
 
-A novel FL system combining:
-- **Early-Exit MobileViTv2**: Difficulty-aware inference with 3 exit points
-- **FedDyn Aggregation**: Dynamic regularization for non-IID data
-- **QUIC Transport**: Low-latency communication with 0-RTT
+Implementation of Nested Learning (NeurIPS 2025) for Federated Learning, featuring:
+
+| Feature | Description |
+|---------|-------------|
+| **Nested Learning** | Multi-timescale optimization (fast/slow weights) |
+| **Early-Exit MobileViTv2** | 3 exit points with difficulty-aware inference |
+| **Local Surprise Signal (LSS)** | Sample importance weighting |
+| **Continuum Memory System (CMS)** | 4-level memory for catastrophic forgetting |
+| **QUIC Transport** | Low-latency communication with 0-RTT |
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    FL Server (RTX 4070)                     │
-│  ┌────────────────┐  ┌──────────────────────────────────┐  │
-│  │  QUIC Server   │→ │  FedDyn Aggregator               │  │
-│  │  (Port 4433)   │  │  - Dynamic regularization (α)    │  │
-│  └────────────────┘  │  - Gradient correction (h)       │  │
-│                      └──────────────────────────────────┘  │
-└────────────────────────┬────────────────────────────────────┘
-                         │ QUIC (0-RTT + Multiplexing)
-         ┌───────────────┼───────────────┐
-         ▼               ▼               ▼
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│  Client 1   │  │  Client 2   │  │  Client 3   │
-│ ┌─────────┐ │  │ ┌─────────┐ │  │ ┌─────────┐ │
-│ │EarlyExit│ │  │ │EarlyExit│ │  │ │EarlyExit│ │
-│ │MobileViT│ │  │ │MobileViT│ │  │ │MobileViT│ │
-│ │ 3 Exits │ │  │ │ 3 Exits │ │  │ │ 3 Exits │ │
-│ └─────────┘ │  │ └─────────┘ │  │ └─────────┘ │
-└─────────────┘  └─────────────┘  └─────────────┘
-```
+┌────────────────────────────────────────────────────────────────┐
+│                    FL Server (RTX 4070)                        │
+│  • QUIC Server (Port 4433)                                     │
+│  • FedProx/FedDyn Aggregation                                  │
+└────────────────────┬───────────────────────────────────────────┘
+                     │ QUIC (0-RTT + Multiplexing)
+     ┌───────────────┼───────────────┐
+     ▼               ▼               ▼
+┌──────────┐  ┌──────────┐  ┌──────────────┐
+│ Client 1 │  │ Client 2 │  │ Jetson Nano  │
+│ RTX GPU  │  │ RTX GPU  │  │ Edge Device  │
+└──────────┘  └──────────┘  └──────────────┘
 
-### Early-Exit Model
-
-```
-Input → Stem → MobileNet Blocks → Exit 1 (33% compute)
-                    ↓
-              Transformer Blocks → Exit 2 (66% compute)
-                    ↓
-              Final Classifier  → Exit 3 (100% compute)
+Each client runs:
+┌─────────────────────────────────────────────┐
+│        NestedEarlyExitTrainer               │
+│  ┌─────────────────────────────────────┐    │
+│  │ MobileViTv2 + Early Exit (3 exits)  │    │
+│  │ Fast weights: Exit classifiers      │    │
+│  │ Slow weights: Backbone              │    │
+│  └─────────────────────────────────────┘    │
+│  + LSS (Local Surprise Signal)              │
+│  + CMS (4-level Continuum Memory)           │
+└─────────────────────────────────────────────┘
 ```
 
 ## 📁 Project Structure
 
 ```
 Fed/
-├── client/                 # FL Client
-│   ├── app_client.py       # Main entry point
-│   ├── early_exit_trainer.py  # Training with multi-exit loss
-│   ├── fl_client.py        # Flower-compatible client
-│   └── data_manager.py     # Dataset loading (CIFAR, MedMNIST)
-├── server/                 # FL Server
-│   ├── app_server.py       # Main entry point
-│   ├── quic_server.py      # QUIC connection handler
-│   └── feddyn_aggregator.py  # FedDyn/FedNova strategies
-├── models/                 # Neural Networks
-│   └── early_exit_mobilevit.py  # MobileViTv2 + Early Exit
-├── transport/              # Communication
-│   ├── quic_protocol.py    # QUIC stream handling
-│   └── serializer.py       # Quantization + LZ4
-├── evaluation/             # IEEE Metrics
-│   └── fl_evaluator.py     # Publication-ready evaluation
-├── utils/                  # Utilities
-│   ├── config.py           # Configuration
-│   └── metrics.py          # Basic metrics
-├── tests/                  # Test suite
-│   ├── test_model.py
-│   └── scripts/            # Shell scripts
-└── scripts/                # Setup scripts
-    ├── setup.sh
-    └── setup_conda.sh
+├── client/                     # FL Client
+│   ├── nested_trainer.py       # ⭐ Main trainer (LSS, CMS, DMGD)
+│   ├── early_exit_trainer.py   # Basic early-exit trainer
+│   ├── app_client.py           # CLI entry point
+│   └── data_manager.py         # Dataset loading
+├── server/                     # FL Server
+│   ├── quic_server.py          # QUIC connection handler
+│   └── feddyn_aggregator.py    # Aggregation strategies
+├── models/
+│   └── early_exit_mobilevit.py # MobileViTv2 + 3 Early Exits
+├── scripts/
+│   ├── run_experiment.py       # ⭐ IEEE-style experiment runner
+│   ├── setup.sh                # Linux setup
+│   └── setup_conda.sh          # macOS setup
+├── jetson/
+│   ├── run_client.sh           # ⭐ One-click Jetson setup
+│   └── README.md
+├── tests/
+│   ├── test_nested_features.py # ⭐ Test LSS, DMGD, CMS
+│   └── test_model.py
+└── utils/
+    ├── config.py               # Configuration
+    └── torch_compat.py         # PyTorch 1.x/2.x compatibility
 ```
 
 ## 🚀 Quick Start
@@ -83,133 +81,99 @@ Fed/
 ### Installation
 
 ```bash
-# Clone repository
-git clone <repo-url>
+git clone https://github.com/QuocKhanhLuong/Fed.git
 cd Fed
 
-# Install dependencies
+# Option 1: Conda (recommended)
+./scripts/setup_conda.sh
+
+# Option 2: pip
 pip install -r requirements.txt
-
-# Generate TLS certificates (for QUIC)
-openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes
 ```
 
-### Run FL Experiment
+### Run Experiment (Simulation Mode)
 
-**Terminal 1 - Server:**
 ```bash
-python server/app_server.py \
-  --min-clients 2 \
-  --rounds 50 \
-  --high-performance
+# Quick test - 1 client, 5 rounds
+python scripts/run_experiment.py \
+    --mode simulation \
+    --num_clients 1 \
+    --num_rounds 5 \
+    --dataset cifar10 \
+    --batch_size 64
+
+# Full experiment - 10 clients, non-IID
+python scripts/run_experiment.py \
+    --mode simulation \
+    --num_clients 10 \
+    --num_rounds 50 \
+    --dataset cifar100 \
+    --partition dirichlet \
+    --alpha 0.5
 ```
 
-**Terminal 2 - Client 1:**
+### Run on Jetson Nano
+
 ```bash
-python client/app_client.py \
-  --server-host localhost \
-  --client-id client_0 \
-  --dataset cifar100 \
-  --alpha 0.1
+# One-click setup and run
+./jetson/run_client.sh --server <SERVER_IP>
 ```
 
-**Terminal 3 - Client 2:**
-```bash
-python client/app_client.py \
-  --client-id client_1 \
-  --alpha 0.3
-```
+## ⚙️ Key Parameters
 
-## 📊 Evaluation Framework
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--num_clients` | 10 | Number of FL clients K |
+| `--num_rounds` | 50 | Communication rounds T |
+| `--local_epochs` | 5 | Local epochs E |
+| `--partition` | dirichlet | Data partition (iid, dirichlet) |
+| `--alpha` | 0.5 | Dirichlet α (lower = more non-IID) |
+| `--use_lss` | True | Enable Local Surprise Signal |
+| `--cms_levels` | 4 | CMS memory levels |
+| `--use_dmgd` | False | Enable Deep Momentum GD |
 
-Generate IEEE-format tables for your paper:
+## 🔬 Nested Learning Features (NeurIPS 2025)
+
+### 1. Local Surprise Signal (LSS)
 
 ```python
-from evaluation import FLEvaluator, ExperimentConfig
-
-# Initialize evaluator
-evaluator = FLEvaluator("my_experiment")
-evaluator.set_config(ExperimentConfig(
-    num_rounds=50,
-    num_clients=3,
-    dataset="cifar100",
-    strategy="FedDyn"
-))
-
-# Log each round
-for round_num in range(50):
-    # ... training ...
-    evaluator.log_round(
-        round_num=round_num,
-        global_accuracy=accuracy,
-        client_accuracies=[c1_acc, c2_acc, c3_acc],
-        bytes_sent=bytes_s,
-        exit_distribution=[0.3, 0.3, 0.4]  # Early-exit ratios
-    )
-
-# Generate publication tables
-print(evaluator.generate_tables())
-evaluator.save_results()  # Saves JSON + Markdown
+# Weights samples by "surprise" (loss magnitude)
+LSS(x) = loss(x) / E[loss]
+# Higher loss = more surprising = higher weight
 ```
 
-### Output Tables
-
-| Table | Metrics |
-|-------|---------|
-| Table I | Accuracy, F1-Score, Convergence Round |
-| Table II | Communication Cost, Bytes/Round |
-| Table III | Fairness (σ), Min/Max Accuracy |
-| Table IV | Exit Distribution, Compute Savings |
-| Table V | Training Time, Round Latency |
-
-## ⚙️ Configuration
+### 2. Continuum Memory System (CMS)
 
 ```python
-from utils.config import get_rtx4070_config
-
-config = get_rtx4070_config()
-config.federated.aggregation_strategy = "FedDyn"
-config.federated.feddyn_alpha = 0.01
-config.training.batch_size = 64
+# 4-level memory with exponential update frequencies
+update_freqs = [1, 5, 25, 125]  # Steps between updates
+# Fast layer: adapts immediately
+# Anchor layer: preserves long-term knowledge
 ```
 
-## 🔬 Key Features
+### 3. Deep Momentum GD (Optional)
 
-| Feature | Description |
-|---------|-------------|
-| **Early-Exit** | 3 exit points, difficulty-aware inference |
-| **FedDyn** | Dynamic regularization, handles non-IID |
-| **QUIC** | 0-RTT, multiplexing, congestion control |
-| **Compression** | INT8 quantization + LZ4 (4x reduction) |
+```python
+# MLP-based momentum instead of EMA
+DeepMomentum: gradient → MLP → momentum_update
+```
 
-## 📈 Expected Results
-
-| Metric | FedAvg | FedDyn (Ours) |
-|--------|--------|---------------|
-| Accuracy | 78.2% | **83.5%** |
-| Convergence | 50 rounds | **35 rounds** |
-| Communication | 120 MB | **32 MB** |
-| Compute Savings | 0% | **25%** (Early-Exit) |
-
-## 🧪 Running Tests
+## 📊 Running Tests
 
 ```bash
-# Test Early-Exit trainer
+# Test Nested Learning features
+python tests/test_nested_features.py
+
+# Test model training
 python tests/test_model.py
-
-# Test evaluation framework
-python evaluation/fl_evaluator.py
-
-# Test FedDyn aggregator
-python server/feddyn_aggregator.py
 ```
 
 ## 📝 Citation
 
 ```bibtex
-@article{author2025earlyexit-fl,
-  title={Difficulty-Aware Federated Learning with Early-Exit Networks},
-  author={Your Name et al.},
+@article{luong2025nestedexit,
+  title={Difficulty-Aware Federated Learning with Nested Early-Exit Networks},
+  author={Luong, Quoc Khanh},
   journal={IEEE Transactions on Mobile Computing},
   year={2025}
 }
