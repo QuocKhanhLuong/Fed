@@ -111,9 +111,17 @@ DEFAULT_CONFIG = {
     'distillation_weight': 0.1,  # β: Distillation loss weight
     'distillation_temp': 3.0,    # T: Temperature
     
-    # CMS (Continuum Memory System)
+    # CMS (Continuum Memory System) - Extended
     'cms_enabled': True,         # Enable memory system
     'cms_weight': 0.001,         # Memory regularization weight
+    'cms_num_levels': 4,         # NEW: Number of memory levels
+    
+    # NEW: Local Surprise Signal (LSS)
+    'use_lss': True,             # Enable sample importance weighting
+    'lss_temperature': 1.0,      # Temperature for weighting
+    
+    # NEW: Deep Momentum GD (disabled by default)
+    'use_deep_momentum': False,  # Enable MLP-based momentum
     
     # System
     'device': 'auto',            # cuda, cpu, or auto
@@ -379,6 +387,10 @@ class FederatedExperiment:
             distillation_temp=self.config['distillation_temp'],
             cms_enabled=self.config['cms_enabled'],
             cms_weight=self.config['cms_weight'],
+            cms_num_levels=self.config['cms_num_levels'],
+            use_lss=self.config['use_lss'],
+            lss_temperature=self.config['lss_temperature'],
+            use_deep_momentum=self.config['use_deep_momentum'],
             use_timm_pretrained=self.config['use_pretrained'],
         )
     
@@ -584,6 +596,18 @@ def parse_args():
     parser.add_argument('--exit_threshold', type=float, default=0.8,
                         help='Early exit confidence threshold τ')
     
+    # NEW: Nested Learning Features (NeurIPS 2025)
+    parser.add_argument('--use_lss', action='store_true', default=True,
+                        help='Enable Local Surprise Signal (LSS)')
+    parser.add_argument('--no_lss', action='store_true',
+                        help='Disable Local Surprise Signal')
+    parser.add_argument('--lss_temp', type=float, default=1.0,
+                        help='LSS temperature (higher = more uniform)')
+    parser.add_argument('--use_dmgd', action='store_true',
+                        help='Enable Deep Momentum GD (adds overhead)')
+    parser.add_argument('--cms_levels', type=int, default=4,
+                        help='Number of CMS memory levels')
+    
     # System
     parser.add_argument('--device', type=str, default='auto',
                         help='Device: cuda, cpu, or auto')
@@ -638,6 +662,11 @@ def main():
         'device': args.device,
         'seed': args.seed,
         'mixed_precision': not args.no_amp,
+        # Nested Learning Features (NeurIPS 2025)
+        'use_lss': args.use_lss and not args.no_lss,
+        'lss_temperature': args.lss_temp,
+        'use_deep_momentum': args.use_dmgd,
+        'cms_num_levels': args.cms_levels,
     })
     
     # Log configuration
