@@ -1,11 +1,11 @@
 #!/bin/bash
 # Quick setup script for macOS with Conda
-# Script cài đặt nhanh cho FL-QUIC-LoRA
+# Script cài đặt nhanh cho FL-QUIC
 
 set -e
 
 echo "=========================================="
-echo "FL-QUIC-LoRA - Cài Đặt Nhanh"
+echo "FL-QUIC - Cài Đặt Nhanh"
 echo "=========================================="
 
 # Check if conda is available
@@ -91,11 +91,8 @@ pip install aioquic --quiet || {
 pip install flwr --quiet
 echo "   ✓ flwr"
 
-pip install transformers --quiet
-echo "   ✓ transformers"
-
-pip install peft --quiet
-echo "   ✓ peft"
+pip install timm --quiet
+echo "   ✓ timm"
 
 pip install tqdm --quiet
 echo "   ✓ tqdm"
@@ -114,6 +111,7 @@ python -c "import lz4; print('✓ LZ4')" || echo "✗ LZ4"
 python -c "import torch; print('✓ PyTorch:', torch.__version__)" || echo "✗ PyTorch"
 python -c "import aioquic; print('✓ aioquic')" || echo "✗ aioquic"
 python -c "import flwr; print('✓ Flower')" || echo "✗ Flower"
+python -c "import timm; print('✓ timm:', timm.__version__)" || echo "✗ timm"
 
 # Run demo
 echo ""

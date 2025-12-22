@@ -1,11 +1,11 @@
 #!/bin/bash
-# Setup script for FL-QUIC-LoRA project
+# Setup script for FL-QUIC project
 # Run this on both server and clients
 
 set -e
 
 echo "=========================================="
-echo "FL-QUIC-LoRA Setup Script"
+echo "FL-QUIC Setup Script"
 echo "=========================================="
 
 # Detect platform
@@ -52,7 +52,7 @@ if [[ $PLATFORM == "jetson" ]]; then
     fi
     
     # Install other dependencies (excluding torch/torchvision)
-    pip install aioquic cryptography flwr lz4 numpy tqdm transformers peft tensorboard
+    pip install aioquic cryptography flwr lz4 numpy tqdm timm tensorboard
 else
     echo "Installing standard packages..."
     pip install -r requirements.txt
@@ -66,6 +66,7 @@ python3 -c "import aioquic; print('✓ aioquic')" || echo "✗ aioquic FAILED"
 python3 -c "import lz4; print('✓ lz4')" || echo "✗ lz4 FAILED"
 python3 -c "import numpy; print('✓ numpy')" || echo "✗ numpy FAILED"
 python3 -c "import flwr; print('✓ flwr')" || echo "✗ flwr FAILED"
+python3 -c "import timm; print('✓ timm')" || echo "✗ timm FAILED"
 
 # Test transport layer
 echo ""

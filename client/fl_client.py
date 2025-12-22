@@ -3,7 +3,7 @@ FL Client for Federated Learning with Early-Exit Networks
 
 This module provides the Flower-compatible FL client interface.
 
-Author: Research Team - FL-QUIC-LoRA Project
+Author: Research Team - FL-QUIC Project
 """
 
 import numpy as np
@@ -25,8 +25,7 @@ try:
 except ImportError:
     DataLoader = Any
 
-from .early_exit_trainer import EarlyExitTrainer, create_dummy_dataset
-from .nested_trainer import NestedEarlyExitTrainer
+from .nested_trainer import NestedEarlyExitTrainer, create_dummy_dataset
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,7 +40,7 @@ class FLClient(fl.client.NumPyClient if HAS_FLOWER else object):
     
     def __init__(
         self, 
-        trainer: EarlyExitTrainer, 
+        trainer: NestedEarlyExitTrainer, 
         train_loader, 
         test_loader, 
         local_epochs: int = 3, 
@@ -137,14 +136,9 @@ def create_fl_client(
     val_loader: Optional[DataLoader] = None,
     test_loader: Optional[DataLoader] = None,
     use_mixed_precision: bool = True,
-    # Legacy parameters (ignored for backwards compatibility)
-    lora_r: int = 8,
-    network_monitor: Optional[Any] = None,
-    use_sam: bool = False,
-    use_tta: bool = False,
 ) -> FLClient:
     """
-    Factory function to create FL client with Early-Exit trainer.
+    Factory function to create FL client with Nested Early-Exit trainer.
     
     Args:
         num_classes: Number of output classes
@@ -164,7 +158,7 @@ def create_fl_client(
         use_mixed_precision=use_mixed_precision,
         use_self_distillation=True,
         cms_enabled=True,
-        use_timm_pretrained=True,  # Full pretrained MobileViTv2
+        use_timm_pretrained=True,
     )
     logger.info(f"Created NestedEarlyExitTrainer for FL client")
     

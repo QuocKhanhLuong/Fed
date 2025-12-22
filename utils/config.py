@@ -1,12 +1,12 @@
 """
-Configuration Module for FL-QUIC-LoRA Project
+Configuration Module for FL-QUIC Project
 Central configuration for hyperparameters and system settings
 
-Author: Research Team - FL-QUIC-LoRA Project
+Author: Research Team - FL-QUIC Project
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List
 
 
 @dataclass
@@ -32,7 +32,7 @@ class FederatedConfig:
     """Federated Learning configuration"""
     num_rounds: int = 10
     min_clients: int = 2
-    min_available_clients: int = 3  # Changed from 2 to match NUM_CLIENTS
+    min_available_clients: int = 3
     client_fraction: float = 1.0  # Fraction of clients to sample per round
     
     # Aggregation strategy
@@ -41,27 +41,43 @@ class FederatedConfig:
     
     # Convergence tracking
     target_accuracy: float = 0.80  # Target accuracy for convergence detection
-    convergence_patience: int = 3  # Rounds to wait for improvement before declaring convergence
+    convergence_patience: int = 3  # Rounds to wait for improvement
 
 
 @dataclass
 class ModelConfig:
     """Model architecture configuration"""
-    # MobileViT settings
-    model_name: str = "apple/mobilevit-small"
+    # Model settings
+    model_name: str = "mobilevitv2_100"  # timm model name
     num_classes: int = 100  # CIFAR-100
-    image_size: int = 224
+    image_size: int = 32  # Input image size
     
-    # LoRA settings (Feature D)
-    use_lora: bool = True  # Use LoRA for parameter-efficient fine-tuning
-    lora_r: int = 8  # LoRA rank
-    lora_alpha: int = 16  # Scaling factor
-    lora_dropout: float = 0.1
-    lora_target_modules: Optional[list] = None  # Will be set to ["qkv"] for ViT
+    # Early Exit settings
+    exit_weights: List[float] = None  # Weights for each exit [exit1, exit2, exit3]
+    exit_threshold: float = 0.8  # Confidence threshold for early exit
+    
+    # Nested Learning settings
+    fast_lr_multiplier: float = 3.0  # Learning rate multiplier for fast weights
+    slow_update_freq: int = 5  # Update slow weights every N steps
+    
+    # Self-Distillation
+    use_self_distillation: bool = True
+    distillation_weight: float = 0.1
+    distillation_temp: float = 3.0
+    
+    # Continuum Memory System (CMS)
+    cms_enabled: bool = True
+    cms_update_freqs: List[int] = None  # [1, 5, 25]
+    cms_decay_rates: List[float] = None  # [0.0, 0.9, 0.99]
+    cms_weight: float = 0.001
     
     def __post_init__(self):
-        if self.lora_target_modules is None:
-            self.lora_target_modules = ["qkv"]  # Target attention layers
+        if self.exit_weights is None:
+            self.exit_weights = [0.3, 0.3, 0.4]
+        if self.cms_update_freqs is None:
+            self.cms_update_freqs = [1, 5, 25]
+        if self.cms_decay_rates is None:
+            self.cms_decay_rates = [0.0, 0.9, 0.99]
 
 
 @dataclass
@@ -74,13 +90,13 @@ class TrainingConfig:
     fedprox_mu: float = 0.01
     
     # Training
-    local_epochs: int = 50  # Increased for early-exit model convergence
-    batch_size: int = 16  # Reduced for multi-client FL on single GPU
+    local_epochs: int = 50
+    batch_size: int = 16
     num_workers: int = 2
     
     # Device
     device: str = "cuda"  # Will be auto-detected
-    mixed_precision: bool = True  # Use FP16 on Jetson Nano
+    mixed_precision: bool = True  # Use FP16 on GPU
     
     # Data
     train_split: float = 0.8
@@ -89,17 +105,7 @@ class TrainingConfig:
     # Dataset Configuration
     dataset_name: str = "cifar100"  # cifar10, cifar100, pathmnist, etc.
     data_dir: str = "./data"  # Directory to store datasets
-    partition_alpha: float = 0.5  # Dirichlet concentration parameter (lower = more skew)
-    
-    # Advanced Training Techniques
-    # Feature A: Sharpness-Aware Minimization (SAM)
-    use_sam: bool = False  # Enable SAM optimizer for better generalization
-    sam_rho: float = 0.05  # Neighborhood size for SAM
-    
-    # Feature C: Test-Time Adaptation (TTA)
-    use_tta: bool = False  # Enable TTA during evaluation
-    tta_steps: int = 1  # Number of TTA adaptation steps
-    tta_lr: float = 1e-4  # Learning rate for TTA
+    partition_alpha: float = 0.5  # Dirichlet concentration parameter
 
 
 @dataclass
@@ -175,18 +181,25 @@ def get_jetson_config() -> Config:
     """Get optimized configuration for Jetson Nano"""
     config = Config()
     
-    # Reduce batch size for limited memory
-    config.training.batch_size = 16
+    # Reduce batch size for limited memory (4GB RAM)
+    config.training.batch_size = 8
     config.training.mixed_precision = True
     config.training.num_workers = 2
+    
+    # Smaller image size for faster inference
+    config.model.image_size = 32
     
     # Aggressive compression for limited bandwidth
     config.compression.enable_quantization = True
     config.compression.compression_level = 9
     
-    # Smaller LoRA rank for faster training
-    config.model.lora_r = 4
-    config.model.lora_alpha = 8
+    # Simpler early exit config
+    config.model.exit_threshold = 0.7  # Lower threshold for faster inference
+    config.model.fast_lr_multiplier = 2.0
+    config.model.slow_update_freq = 10
+    
+    # Disable CMS for memory saving
+    config.model.cms_enabled = False
     
     return config
 
@@ -204,9 +217,9 @@ def get_server_config() -> Config:
     config.federated.min_clients = 5
     config.federated.min_available_clients = 3
     
-    # Higher LoRA rank for better performance
-    config.model.lora_r = 16
-    config.model.lora_alpha = 32
+    # Full features
+    config.model.cms_enabled = True
+    config.model.use_self_distillation = True
     
     return config
 
@@ -224,6 +237,10 @@ def get_rtx4070_config() -> Config:
     config.federated.min_clients = 3
     config.federated.num_rounds = 50
     config.federated.aggregation_strategy = "FedDyn"
+    
+    # Full features enabled
+    config.model.cms_enabled = True
+    config.model.use_self_distillation = True
     
     # Compression
     config.compression.compression_level = 9

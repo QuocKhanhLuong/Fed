@@ -5,9 +5,9 @@ Main entry point for Federated Learning client with QUIC transport
 Integrates:
 - QUIC Client (transport)
 - Flower Client (FL logic)
-- MobileViT + LoRA Trainer (model)
+- Nested Early-Exit Trainer (model)
 
-Author: Research Team - FL-QUIC-LoRA Project
+Author: Research Team - FL-QUIC Project
 """
 
 import asyncio
@@ -21,10 +21,9 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from client.quic_client import FLQuicClient
 from client.fl_client import create_fl_client
-from client.model_trainer import MobileViTLoRATrainer
 from client.data_manager import load_dataset
+from client.nested_trainer import create_dummy_dataset
 from utils.config import Config, get_jetson_config
-from transport.serializer import ModelSerializer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,7 +87,6 @@ class FLClientApp:
         except Exception as e:
             logger.error(f"Failed to load dataset '{config.training.dataset_name}': {e}")
             logger.warning("Falling back to dummy data for testing")
-            from client.model_trainer import create_dummy_dataset
             train_loader, test_loader = create_dummy_dataset(
                 num_samples=100,
                 num_classes=config.model.num_classes
@@ -99,15 +97,11 @@ class FLClientApp:
         logger.info("Creating Flower client...")
         self.fl_client = create_fl_client(
             num_classes=config.model.num_classes,
-            lora_r=config.model.lora_r,
             local_epochs=config.training.local_epochs,
             learning_rate=config.training.learning_rate,
             train_loader=train_loader,
             val_loader=val_loader,
             test_loader=test_loader,
-            network_monitor=self.network_monitor,
-            use_sam=config.training.use_sam,
-            use_tta=config.training.use_tta,
         )
         
         # Create async training function for QUIC client
@@ -127,7 +121,7 @@ class FLClientApp:
             server_port=server_port,
             client_id=client_id,
             local_train_fn=train_callback,
-            network_monitor=self.network_monitor,  # Pass same NetworkMonitor
+            network_monitor=self.network_monitor,
         )
         
         logger.info(f"FL Client App initialized: {client_id}")
@@ -171,12 +165,6 @@ async def main():
         help="Use Jetson Nano optimized config"
     )
     parser.add_argument(
-        "--lora-rank",
-        type=int,
-        default=8,
-        help="LoRA rank"
-    )
-    parser.add_argument(
         "--local-epochs",
         type=int,
         default=3,
@@ -193,21 +181,6 @@ async def main():
         type=float,
         default=0.5,
         help="Dirichlet concentration parameter (lower = more skew)"
-    )
-    parser.add_argument(
-        "--use-sam",
-        action="store_true",
-        help="Enable Sharpness-Aware Minimization"
-    )
-    parser.add_argument(
-        "--use-tta",
-        action="store_true",
-        help="Enable Test-Time Adaptation"
-    )
-    parser.add_argument(
-        "--use-lora",
-        action="store_true",
-        help="Enable LoRA (Low-Rank Adaptation)"
     )
     
     args = parser.parse_args()
@@ -226,13 +199,9 @@ async def main():
         config = Config()
     
     # Override config from args
-    config.model.lora_r = args.lora_rank
-    config.model.use_lora = args.use_lora
     config.training.local_epochs = args.local_epochs
     config.training.dataset_name = args.dataset
     config.training.partition_alpha = args.alpha
-    config.training.use_sam = args.use_sam
-    config.training.use_tta = args.use_tta
     
     # Create and run app
     app = FLClientApp(
@@ -255,8 +224,8 @@ if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════════════════════╗
 ║                                                          ║
-║   FL-QUIC-LoRA Federated Learning Client                ║
-║   Accelerating FL on Edge Devices via QUIC & LoRA       ║
+║   FL-QUIC Federated Learning Client                     ║
+║   Nested Early-Exit Networks for Edge Devices            ║
 ║                                                          ║
 ╚══════════════════════════════════════════════════════════╝
     """)

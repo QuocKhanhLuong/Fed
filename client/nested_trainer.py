@@ -56,6 +56,9 @@ import logging
 import gc
 from tqdm import tqdm
 
+# PyTorch 1.x/2.x compatibility (for Jetson Nano)
+from utils.torch_compat import get_autocast, get_grad_scaler
+
 logger = logging.getLogger(__name__)
 
 
@@ -250,9 +253,9 @@ class NestedEarlyExitTrainer:
             logger.info("Using EarlyExitMobileViTv2 (custom architecture)")
         self.model.to(self.device)
         
-        # Mixed precision setup
+        # Mixed precision setup (compatible with PyTorch 1.x/2.x)
         self.use_amp = use_mixed_precision and (self.device.type == "cuda")
-        self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
+        self.scaler = get_grad_scaler('cuda') if self.use_amp else None
         
         # Exit loss weights
         self.exit_weights = exit_weights
@@ -450,7 +453,7 @@ class NestedEarlyExitTrainer:
                 # ═══════════════════════════════════════════════════════
                 optimizer_fast.zero_grad(set_to_none=True)
                 
-                with torch.amp.autocast('cuda', enabled=self.use_amp):
+                with get_autocast('cuda', enabled=self.use_amp):
                     # Forward all exits
                     y1, y2, y3 = self.model.forward_all_exits(images)
                     
@@ -487,7 +490,7 @@ class NestedEarlyExitTrainer:
                 if step_counter % self.slow_update_freq == 0:
                     optimizer_slow.zero_grad(set_to_none=True)
                     
-                    with torch.amp.autocast('cuda', enabled=self.use_amp):
+                    with get_autocast('cuda', enabled=self.use_amp):
                         # Recompute loss for slow weights
                         y1, y2, y3 = self.model.forward_all_exits(images)
                         loss_slow = (

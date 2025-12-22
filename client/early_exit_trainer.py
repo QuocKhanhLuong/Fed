@@ -34,6 +34,9 @@ from typing import Dict, List, Optional, Tuple
 import logging
 import gc
 
+# PyTorch 1.x/2.x compatibility (for Jetson Nano)
+from utils.torch_compat import get_autocast, get_grad_scaler
+
 logger = logging.getLogger(__name__)
 
 
@@ -89,9 +92,9 @@ class EarlyExitTrainer:
         if use_gradient_checkpointing and hasattr(self.model, 'gradient_checkpointing_enable'):
             self.model.gradient_checkpointing_enable()
         
-        # Mixed precision setup
+        # Mixed precision setup (compatible with PyTorch 1.x/2.x)
         self.use_amp = use_mixed_precision and (self.device.type == "cuda")
-        self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
+        self.scaler = get_grad_scaler('cuda') if self.use_amp else None
         
         # Loss configuration
         self.exit_weights = exit_weights
@@ -164,7 +167,7 @@ class EarlyExitTrainer:
                 labels = labels.to(self.device, non_blocking=True)
                 
                 # Forward with mixed precision
-                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                with get_autocast('cuda', enabled=self.use_amp):
                     # Step 4: Forward all exits
                     y1, y2, y3 = self.model.forward_all_exits(images)
                     
