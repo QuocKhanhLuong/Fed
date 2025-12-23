@@ -44,6 +44,7 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -78,10 +79,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = {
     # Federated Learning
-    'num_clients': 10,           # K: Number of clients
+    'num_clients': 3,            # K: Number of clients (default: 3 for parallel)
     'num_rounds': 50,            # T: Communication rounds
     'client_fraction': 1.0,      # C: Fraction of clients per round
     'local_epochs': 5,           # E: Local epochs
+    'parallel_clients': 3,       # Max clients to train in parallel (RTX 4070: 3)
     
     # Dataset
     'dataset': 'cifar100',       # Dataset name
@@ -396,14 +398,15 @@ class FederatedExperiment:
     
     def run_simulation(self):
         """
-        Run FL simulation on single GPU.
+        Run FL simulation on single GPU with parallel client training.
         
-        Algorithm 2: Simulated Federated Training
-        ──────────────────────────────────────────
-        All clients simulated sequentially on one device.
+        Algorithm 2: Simulated Federated Training (Parallel)
+        ─────────────────────────────────────────────────────
+        Clients train in parallel using ThreadPoolExecutor.
+        RTX 4070 (12GB VRAM) supports 3 concurrent models.
         """
         logger.info("=" * 60)
-        logger.info("Starting Federated Learning Simulation")
+        logger.info("Starting Federated Learning Simulation (PARALLEL MODE)")
         logger.info("=" * 60)
         
         # Load data
@@ -433,6 +436,47 @@ class FederatedExperiment:
             'exit_distribution': [],
         }
         
+        # Get parallel config
+        max_parallel = self.config.get('parallel_clients', 3)
+        logger.info(f"Parallel training enabled: max {max_parallel} clients simultaneously")
+        
+        # ═══════════════════════════════════════════════════════════════
+        # Helper function for parallel client training
+        # ═══════════════════════════════════════════════════════════════
+        def train_single_client(client_id: int) -> Tuple[int, List[np.ndarray], int, Dict]:
+            """Train a single client and return results."""
+            # Create client data loader
+            client_data = Subset(train_dataset, client_indices[client_id])
+            client_loader = DataLoader(
+                client_data,
+                batch_size=self.config['batch_size'],
+                shuffle=True,
+                num_workers=0,  # No workers in thread to avoid fork issues
+            )
+            
+            # Create client trainer (each thread gets its own model)
+            client_trainer = self.create_trainer()
+            client_trainer.set_parameters(copy.deepcopy(global_params))
+            
+            # Local training
+            train_metrics = client_trainer.train(
+                client_loader,
+                epochs=self.config['local_epochs'],
+                learning_rate=self.config['learning_rate'],
+                fedprox_mu=self.config['fedprox_mu'],
+                global_weights=global_params,
+            )
+            
+            # Get parameters before cleanup
+            params = client_trainer.get_parameters()
+            num_samples = len(client_indices[client_id])
+            
+            # Clean up
+            del client_trainer
+            torch.cuda.empty_cache()
+            
+            return client_id, params, num_samples, train_metrics
+        
         # Main FL loop
         for round_idx in range(self.config['num_rounds']):
             round_start = time.time()
@@ -449,52 +493,42 @@ class FederatedExperiment:
                 replace=False
             )
             
-            # Local training
+            # ═══════════════════════════════════════════════════════════════
+            # PARALLEL LOCAL TRAINING
+            # ═══════════════════════════════════════════════════════════════
             client_params = []
             client_weights = []
             
-            for client_id in selected_clients:
-                # Create client data loader
-                client_data = Subset(train_dataset, client_indices[client_id])
-                client_loader = DataLoader(
-                    client_data,
-                    batch_size=self.config['batch_size'],
-                    shuffle=True,
-                    num_workers=2,
-                )
+            logger.info(f"Training {len(selected_clients)} clients in parallel (max {max_parallel} concurrent)...")
+            
+            with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+                # Submit all client training jobs
+                futures = {
+                    executor.submit(train_single_client, client_id): client_id 
+                    for client_id in selected_clients
+                }
                 
-                # Create client trainer
-                client_trainer = self.create_trainer()
-                client_trainer.set_parameters(global_params)
-                
-                # Local training
-                train_metrics = client_trainer.train(
-                    client_loader,
-                    epochs=self.config['local_epochs'],
-                    learning_rate=self.config['learning_rate'],
-                    fedprox_mu=self.config['fedprox_mu'],
-                    global_weights=global_params,
-                )
-                
-                logger.info(f"  Client {client_id}: loss={train_metrics['loss']:.4f}, "
-                           f"acc={train_metrics['accuracy']:.4f}")
-                
-                # Collect updates
-                client_params.append(client_trainer.get_parameters())
-                client_weights.append(len(client_indices[client_id]))
-                
-                # Clean up
-                del client_trainer
-                torch.cuda.empty_cache()
+                # Collect results as they complete
+                for future in as_completed(futures):
+                    client_id = futures[future]
+                    try:
+                        cid, params, num_samples, train_metrics = future.result()
+                        client_params.append(params)
+                        client_weights.append(num_samples)
+                        logger.info(f"  ✓ Client {cid}: loss={train_metrics['loss']:.4f}, "
+                                   f"acc={train_metrics['accuracy']:.4f}")
+                    except Exception as e:
+                        logger.error(f"  ✗ Client {client_id} failed: {e}")
             
             # Aggregate
-            global_params = fedprox_aggregation(
-                global_params,
-                client_params,
-                client_weights,
-                mu=self.config['fedprox_mu'],
-            )
-            global_trainer.set_parameters(global_params)
+            if client_params:
+                global_params = fedprox_aggregation(
+                    global_params,
+                    client_params,
+                    client_weights,
+                    mu=self.config['fedprox_mu'],
+                )
+                global_trainer.set_parameters(global_params)
             
             # Evaluate
             eval_metrics = global_trainer.evaluate(
@@ -559,7 +593,7 @@ def parse_args():
                         help='Experiment mode')
     
     # FL Configuration
-    parser.add_argument('--num_clients', type=int, default=10,
+    parser.add_argument('--num_clients', type=int, default=3,
                         help='Number of clients K')
     parser.add_argument('--num_rounds', type=int, default=50,
                         help='Number of communication rounds T')
@@ -567,6 +601,8 @@ def parse_args():
                         help='Local training epochs E')
     parser.add_argument('--client_fraction', type=float, default=1.0,
                         help='Fraction of clients per round C')
+    parser.add_argument('--parallel_clients', type=int, default=3,
+                        help='Max clients to train in parallel (RTX 4070: 3)')
     
     # Dataset
     parser.add_argument('--dataset', type=str, default='cifar100',
@@ -650,6 +686,7 @@ def main():
         'num_rounds': args.num_rounds,
         'local_epochs': args.local_epochs,
         'client_fraction': args.client_fraction,
+        'parallel_clients': args.parallel_clients,
         'dataset': args.dataset,
         'partition': args.partition,
         'alpha': args.alpha,

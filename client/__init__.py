@@ -1,5 +1,11 @@
-"""Client components for FL-QUIC system"""
+"""Client components for Federated Learning"""
 
-from .quic_client import FLQuicClient
+from .nested_trainer import NestedEarlyExitTrainer, create_dummy_dataset
+from .fl_client import FLClient, create_fl_client
 
-__all__ = ['FLQuicClient']
+__all__ = [
+    'NestedEarlyExitTrainer',
+    'create_dummy_dataset',
+    'FLClient',
+    'create_fl_client',
+]

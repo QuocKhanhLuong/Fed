@@ -1,6 +1,5 @@
-"""Server components for FL-QUIC system"""
+"""Server components for Federated Learning"""
 
-# Lazy imports to avoid aioquic dependency when not needed
 from .aggregators import (
     FedAvgAggregator,
     FedProxAggregator, 
@@ -8,6 +7,7 @@ from .aggregators import (
     NestedFedDynAggregator,
     create_aggregator,
 )
+from .fl_strategy import FLStrategy, create_strategy
 
 __all__ = [
     'FedAvgAggregator',
@@ -15,6 +15,6 @@ __all__ = [
     'FedDynAggregator', 
     'NestedFedDynAggregator',
     'create_aggregator',
+    'FLStrategy',
+    'create_strategy',
 ]
-
-from .quic_server import FLQuicServer

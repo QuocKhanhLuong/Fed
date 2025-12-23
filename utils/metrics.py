@@ -62,6 +62,7 @@ class ClassificationEvaluator:
         targets: np.ndarray,
         probabilities: Optional[np.ndarray] = None,
         num_classes: Optional[int] = None,
+        top_k: int = 5,
     ) -> Dict[str, Any]:
         """
         Compute comprehensive classification metrics.
@@ -69,8 +70,9 @@ class ClassificationEvaluator:
         Args:
             predictions: Predicted class labels (N,)
             targets: Ground truth labels (N,)
-            probabilities: Class probabilities (N, C) - optional for AUROC
+            probabilities: Class probabilities (N, C) - optional for AUROC and top-k
             num_classes: Number of classes (auto-detected if None)
+            top_k: K for top-k accuracy (default: 5)
             
         Returns:
             Dictionary with metrics:
@@ -81,6 +83,8 @@ class ClassificationEvaluator:
                 'f1_macro': float,
                 'auroc': float (if probabilities provided),
                 'confusion_matrix': List[List[int]],
+                'per_class_accuracy': Dict[int, float],
+                'top_k_accuracy': float (if probabilities provided),
                 'num_samples': int,
                 'num_classes': int,
             }
@@ -93,6 +97,7 @@ class ClassificationEvaluator:
                 'precision_macro': 0.0,
                 'recall_macro': 0.0,
                 'f1_macro': 0.0,
+                'per_class_accuracy': {},
                 'num_samples': 0,
                 'num_classes': 0,
             }
@@ -112,6 +117,34 @@ class ClassificationEvaluator:
         
         # Basic accuracy (always computable)
         metrics['accuracy'] = float(np.mean(predictions == targets))
+        
+        # ═══════════════════════════════════════════════════════════════
+        # NEW: Per-class accuracy
+        # ═══════════════════════════════════════════════════════════════
+        per_class_acc = {}
+        for c in range(num_classes):
+            mask = (targets == c)
+            if mask.sum() > 0:
+                per_class_acc[c] = float(np.mean(predictions[mask] == c))
+            else:
+                per_class_acc[c] = 0.0
+        metrics['per_class_accuracy'] = per_class_acc
+        
+        # ═══════════════════════════════════════════════════════════════
+        # NEW: Top-k accuracy (requires probabilities)
+        # ═══════════════════════════════════════════════════════════════
+        if probabilities is not None and len(probabilities) > 0:
+            try:
+                probs = np.asarray(probabilities)
+                # Get top-k predictions
+                top_k_preds = np.argsort(probs, axis=1)[:, -top_k:]
+                # Check if true label is in top-k
+                top_k_correct = np.array([
+                    targets[i] in top_k_preds[i] for i in range(len(targets))
+                ])
+                metrics['top_k_accuracy'] = float(np.mean(top_k_correct))
+            except Exception as e:
+                logger.debug(f"Top-k accuracy computation failed: {e}")
         
         # Advanced metrics with sklearn
         if HAS_SKLEARN:
@@ -537,6 +570,268 @@ class AggregatedMetrics:
                 return True, f"No improvement in last {patience} rounds"
         
         return False, "Training continues"
+
+
+# =============================================================================
+# Early-Exit Metrics (IEEE TMC 2025)
+# =============================================================================
+
+class EarlyExitMetrics:
+    """
+    Metrics specific to Early-Exit Networks.
+    
+    Tracks:
+    - Per-exit accuracy: How accurate each exit point is
+    - Exit distribution: What % of samples exit at each point
+    - FLOPs savings: Computational savings from early exits
+    - Latency breakdown: Time per exit
+    
+    Reference: "Difficulty-Aware FL with Early-Exit Networks" (IEEE TMC 2025)
+    """
+    
+    # FLOPs for each exit (normalized to Exit 3 = 1.0)
+    # Based on MobileViTv2 architecture: Exit1=33%, Exit2=66%, Exit3=100%
+    FLOPS_RATIOS = [0.33, 0.66, 1.0]
+    
+    def __init__(self, num_exits: int = 3):
+        """
+        Initialize Early-Exit metrics tracker.
+        
+        Args:
+            num_exits: Number of exit points (default: 3)
+        """
+        self.num_exits = num_exits
+        self.exit_counts = [0] * num_exits
+        self.exit_correct = [0] * num_exits
+        self.total_samples = 0
+        self.flops_ratios = self.FLOPS_RATIOS[:num_exits]
+    
+    def update(
+        self,
+        predictions: np.ndarray,
+        targets: np.ndarray,
+        exit_indices: np.ndarray,
+    ) -> None:
+        """
+        Update metrics with a batch of predictions.
+        
+        Args:
+            predictions: Predicted labels (N,)
+            targets: Ground truth labels (N,)
+            exit_indices: Which exit was used for each sample (N,), values 0 to num_exits-1
+        """
+        for i in range(len(predictions)):
+            exit_idx = int(exit_indices[i])
+            if 0 <= exit_idx < self.num_exits:
+                self.exit_counts[exit_idx] += 1
+                if predictions[i] == targets[i]:
+                    self.exit_correct[exit_idx] += 1
+        self.total_samples += len(predictions)
+    
+    def get_per_exit_accuracy(self) -> List[float]:
+        """
+        Get accuracy for each exit point.
+        
+        Returns:
+            List of accuracies [exit1_acc, exit2_acc, exit3_acc]
+        """
+        accuracies = []
+        for i in range(self.num_exits):
+            if self.exit_counts[i] > 0:
+                accuracies.append(self.exit_correct[i] / self.exit_counts[i])
+            else:
+                accuracies.append(0.0)
+        return accuracies
+    
+    def get_exit_distribution(self) -> List[float]:
+        """
+        Get distribution of samples across exits.
+        
+        Returns:
+            List of ratios [exit1_ratio, exit2_ratio, exit3_ratio]
+        """
+        if self.total_samples == 0:
+            return [0.0] * self.num_exits
+        return [count / self.total_samples for count in self.exit_counts]
+    
+    def get_flops_savings(self) -> float:
+        """
+        Calculate FLOPs savings from early exits.
+        
+        Returns:
+            Percentage of compute saved (0-100)
+        """
+        if self.total_samples == 0:
+            return 0.0
+        
+        # Weighted average of FLOPs used
+        avg_flops = sum(
+            count * ratio 
+            for count, ratio in zip(self.exit_counts, self.flops_ratios)
+        ) / self.total_samples
+        
+        # Savings = 1 - used
+        return (1.0 - avg_flops) * 100.0
+    
+    def get_summary(self) -> Dict[str, Any]:
+        """
+        Get complete early-exit metrics summary.
+        
+        Returns:
+            Dictionary with all metrics
+        """
+        per_exit_acc = self.get_per_exit_accuracy()
+        exit_dist = self.get_exit_distribution()
+        
+        return {
+            'total_samples': self.total_samples,
+            'exit_counts': self.exit_counts.copy(),
+            'per_exit_accuracy': per_exit_acc,
+            'exit_distribution': exit_dist,
+            'avg_exit_depth': sum(
+                (i + 1) * dist for i, dist in enumerate(exit_dist)
+            ),
+            'flops_savings_percent': self.get_flops_savings(),
+            'overall_accuracy': sum(self.exit_correct) / max(1, self.total_samples),
+        }
+    
+    def reset(self) -> None:
+        """Reset all counters."""
+        self.exit_counts = [0] * self.num_exits
+        self.exit_correct = [0] * self.num_exits
+        self.total_samples = 0
+
+
+# =============================================================================
+# Federated Learning Metrics
+# =============================================================================
+
+class FLMetrics:
+    """
+    Metrics specific to Federated Learning experiments.
+    
+    Tracks:
+    - Gradient divergence: Measure of non-IID data heterogeneity
+    - Local vs Global gap: Drift between local and global models
+    - Client participation rate: How many clients participated
+    - Round-level statistics
+    
+    Reference: FedDyn, FedProx, and FL theory papers
+    """
+    
+    def __init__(self):
+        """Initialize FL metrics tracker."""
+        self.round_history = []
+        self.client_participation = []
+        self.gradient_divergences = []
+        self.local_global_gaps = []
+    
+    @staticmethod
+    def compute_gradient_divergence(
+        client_gradients: List[np.ndarray],
+    ) -> float:
+        """
+        Compute gradient divergence across clients (measure of non-IID).
+        
+        Formula: σ² = Σ ||g_i - g_avg||² / K
+        
+        Higher divergence = more heterogeneous data
+        
+        Args:
+            client_gradients: List of flattened gradient arrays from clients
+            
+        Returns:
+            Gradient divergence (variance)
+        """
+        if len(client_gradients) < 2:
+            return 0.0
+        
+        # Stack gradients
+        grads = np.stack([g.flatten() for g in client_gradients])
+        
+        # Compute mean gradient
+        mean_grad = np.mean(grads, axis=0)
+        
+        # Compute variance
+        divergence = np.mean([
+            np.sum((g - mean_grad) ** 2) for g in grads
+        ])
+        
+        return float(divergence)
+    
+    @staticmethod
+    def compute_local_global_gap(
+        local_weights: List[np.ndarray],
+        global_weights: List[np.ndarray],
+    ) -> float:
+        """
+        Compute L2 distance between local and global model.
+        
+        Formula: ||w_local - w_global||²
+        
+        Higher gap = more drift from global model
+        
+        Args:
+            local_weights: Local model weights (list of arrays)
+            global_weights: Global model weights (list of arrays)
+            
+        Returns:
+            L2 distance squared
+        """
+        gap = 0.0
+        for local, global_ in zip(local_weights, global_weights):
+            gap += np.sum((local - global_) ** 2)
+        return float(gap)
+    
+    def log_round(
+        self,
+        round_num: int,
+        num_clients_participated: int,
+        num_clients_total: int,
+        gradient_divergence: Optional[float] = None,
+        avg_local_global_gap: Optional[float] = None,
+    ) -> None:
+        """
+        Log metrics for a single FL round.
+        
+        Args:
+            round_num: Current round number
+            num_clients_participated: Number of clients that participated
+            num_clients_total: Total number of available clients
+            gradient_divergence: Gradient divergence (if computed)
+            avg_local_global_gap: Average local-global gap (if computed)
+        """
+        participation_rate = num_clients_participated / max(1, num_clients_total)
+        self.client_participation.append(participation_rate)
+        
+        if gradient_divergence is not None:
+            self.gradient_divergences.append(gradient_divergence)
+        
+        if avg_local_global_gap is not None:
+            self.local_global_gaps.append(avg_local_global_gap)
+        
+        self.round_history.append({
+            'round': round_num,
+            'participation_rate': participation_rate,
+            'gradient_divergence': gradient_divergence,
+            'local_global_gap': avg_local_global_gap,
+        })
+    
+    def get_summary(self) -> Dict[str, Any]:
+        """
+        Get complete FL metrics summary.
+        
+        Returns:
+            Dictionary with aggregated FL metrics
+        """
+        return {
+            'total_rounds': len(self.round_history),
+            'avg_participation_rate': float(np.mean(self.client_participation)) if self.client_participation else 0.0,
+            'avg_gradient_divergence': float(np.mean(self.gradient_divergences)) if self.gradient_divergences else 0.0,
+            'avg_local_global_gap': float(np.mean(self.local_global_gaps)) if self.local_global_gaps else 0.0,
+            'participation_history': self.client_participation.copy(),
+            'divergence_history': self.gradient_divergences.copy(),
+        }
 
 
 # Example usage and tests
