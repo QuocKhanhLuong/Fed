@@ -758,11 +758,33 @@ class NestedEarlyExitTrainer:
                 total_correct += (y3.argmax(1) == labels).sum().item()
                 total_samples += labels.size(0)
                 
+                # Collect predictions for F1/Precision/Recall
+                if 'all_preds' not in locals():
+                    all_preds = []
+                    all_labels = []
+                all_preds.extend(y3.argmax(1).cpu().tolist())
+                all_labels.extend(labels.cpu().tolist())
+                
                 # Update progress bar
                 pbar.set_postfix({
                     'loss': f'{total_loss / total_samples:.4f}',
                     'acc': f'{100 * total_correct / total_samples:.1f}%'
                 })
+            
+            # Calculate per-epoch metrics
+            epoch_acc = total_correct / max(total_samples, 1)
+            epoch_loss = total_loss / max(total_samples, 1)
+            
+            # Calculate F1/Precision/Recall using sklearn
+            try:
+                from sklearn.metrics import precision_score, recall_score, f1_score
+                precision = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+                recall = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+                f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+                logger.info(f"  Epoch {epoch+1}/{epochs}: acc={epoch_acc:.4f}, loss={epoch_loss:.4f}, "
+                           f"F1={f1:.4f}, Prec={precision:.4f}, Recall={recall:.4f}")
+            except ImportError:
+                logger.info(f"  Epoch {epoch+1}/{epochs}: acc={epoch_acc:.4f}, loss={epoch_loss:.4f}")
             
             # Step schedulers at end of epoch
             if scheduler_fast is not None:
