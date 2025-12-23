@@ -86,8 +86,8 @@ def train_fn(msg: Message, context: Context):
         # Train with Nested Learning (DMGD + CMS + LSS)
         metrics = trainer.train(
             train_loader=trainloader,
-            local_epochs=local_epochs,
-            lr=lr,
+            epochs=local_epochs,
+            learning_rate=lr,
         )
         
         # Get updated state_dict for aggregation
