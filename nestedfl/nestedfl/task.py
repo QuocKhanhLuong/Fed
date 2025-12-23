@@ -189,11 +189,18 @@ def train(model, trainloader, epochs: int, lr: float, device):
     return total_loss / max(num_batches, 1)
 
 
-def test(model, testloader, device):
+def test(model, testloader, device, return_exit_stats=False):
     """
     Evaluate model on test data.
     
-    Returns (loss, accuracy).
+    Args:
+        model: Model to evaluate
+        testloader: Test data loader
+        device: Device to use
+        return_exit_stats: If True, returns (loss, accuracy, exit_stats)
+    
+    Returns:
+        (loss, accuracy) or (loss, accuracy, exit_stats) if return_exit_stats=True
     """
     model.to(device)
     model.eval()
@@ -202,6 +209,10 @@ def test(model, testloader, device):
     correct = 0
     total = 0
     total_loss = 0.0
+    
+    # Exit statistics
+    exit_correct = [0, 0, 0]  # Correct predictions per exit
+    exit_total = [0, 0, 0]    # Total samples per exit
     
     with torch.no_grad():
         for batch in testloader:
@@ -213,24 +224,26 @@ def test(model, testloader, device):
                 images, labels = batch
             
             images = images.to(device)
-            labels = labels.to(device).long()  # Ensure Long type for CrossEntropyLoss
+            labels = labels.to(device).long()
             
-            # For early-exit models, use threshold=0.0 to always go to final exit
-            # This ensures eval accuracy matches training (which uses all exits equally)
+            # For early-exit models, collect per-exit statistics
             if hasattr(model, 'forward_all_exits'):
-                # Use forward_all_exits and take final exit (y3) for consistency
                 y1, y2, y3 = model.forward_all_exits(images)
-                outputs = y3
+                outputs = y3  # Use final exit for main accuracy
+                
+                # Per-exit accuracy
+                for i, y in enumerate([y1, y2, y3]):
+                    _, pred = torch.max(y, 1)
+                    exit_correct[i] += (pred == labels).sum().item()
+                    exit_total[i] += labels.size(0)
             else:
                 outputs = model(images)
-                # Handle early-exit model: returns (logits, exit_indices) tuple
                 if isinstance(outputs, (list, tuple)):
                     if len(outputs) == 2 and outputs[1].dtype == torch.long:
                         outputs = outputs[0]
                     else:
                         outputs = outputs[-1]
             
-            # Ensure outputs are 2D (batch_size, num_classes)
             if outputs.dim() == 1:
                 outputs = outputs.unsqueeze(0)
             
@@ -243,6 +256,17 @@ def test(model, testloader, device):
     
     accuracy = correct / total if total > 0 else 0.0
     avg_loss = total_loss / len(testloader) if len(testloader) > 0 else 0.0
+    
+    if return_exit_stats and exit_total[0] > 0:
+        exit_stats = {
+            'exit1_acc': exit_correct[0] / exit_total[0],
+            'exit2_acc': exit_correct[1] / exit_total[1],
+            'exit3_acc': exit_correct[2] / exit_total[2],
+            'exit1_total': exit_total[0],
+            'exit2_total': exit_total[1],
+            'exit3_total': exit_total[2],
+        }
+        return avg_loss, accuracy, exit_stats
     
     return avg_loss, accuracy
 
