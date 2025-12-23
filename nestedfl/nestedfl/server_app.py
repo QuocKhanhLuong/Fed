@@ -6,6 +6,7 @@ with FedAvg/FedDyn aggregation.
 """
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -14,7 +15,13 @@ from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
 
+# Setup logging (creates timestamped log file)
+from nestedfl.logging_config import setup_logging, get_log_file
+setup_logging()
+
 from nestedfl.task import get_model, test, load_data
+
+logger = logging.getLogger(__name__)
 
 # Create ServerApp
 app = ServerApp()
