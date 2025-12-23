@@ -58,8 +58,8 @@ fast-lr-mult = 5.0
 slow-update-freq = 5
 use-distillation = false  # Not used in paper
 cms-enabled = true
-use-lss = true            # Local Surprise Signal
-use-dmgd = true           # Deep Momentum GD
+use-lss = false           # DISABLED: causes NaN - needs debugging
+use-dmgd = false          # DISABLED: causes NaN - needs debugging
 
 # =====================================================================
 # Federations
