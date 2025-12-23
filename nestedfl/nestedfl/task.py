@@ -215,17 +215,20 @@ def test(model, testloader, device):
             images = images.to(device)
             labels = labels.to(device).long()  # Ensure Long type for CrossEntropyLoss
             
-            outputs = model(images)
-            
-            # Handle early-exit model: returns (logits, exit_indices) tuple
-            # or list of [exit1, exit2, exit3] logits from forward_all_exits()
-            if isinstance(outputs, (list, tuple)):
-                # If it's (logits, exit_indices) from forward(), take first element
-                # If it's [y1, y2, y3] from forward_all_exits(), take last element
-                if len(outputs) == 2 and outputs[1].dtype == torch.long:
-                    outputs = outputs[0]  # (logits, exit_indices) -> logits
-                else:
-                    outputs = outputs[-1]  # [y1, y2, y3] -> y3
+            # For early-exit models, use threshold=0.0 to always go to final exit
+            # This ensures eval accuracy matches training (which uses all exits equally)
+            if hasattr(model, 'forward_all_exits'):
+                # Use forward_all_exits and take final exit (y3) for consistency
+                y1, y2, y3 = model.forward_all_exits(images)
+                outputs = y3
+            else:
+                outputs = model(images)
+                # Handle early-exit model: returns (logits, exit_indices) tuple
+                if isinstance(outputs, (list, tuple)):
+                    if len(outputs) == 2 and outputs[1].dtype == torch.long:
+                        outputs = outputs[0]
+                    else:
+                        outputs = outputs[-1]
             
             # Ensure outputs are 2D (batch_size, num_classes)
             if outputs.dim() == 1:
