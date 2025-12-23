@@ -26,7 +26,7 @@ def get_evaluate_fn(num_classes: int, dataset: str):
     
     This evaluates the global model on the full test set after each round.
     """
-    def evaluate_fn(arrays: ArrayRecord):
+    def evaluate_fn(server_round: int, arrays: ArrayRecord):
         """Evaluate global model on centralized test set."""
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         
@@ -41,7 +41,7 @@ def get_evaluate_fn(num_classes: int, dataset: str):
         # Evaluate
         loss, accuracy = test(model, testloader, device)
         
-        print(f"[Server] Centralized Eval: loss={loss:.4f}, acc={accuracy:.4f}")
+        print(f"[Server] Round {server_round}: loss={loss:.4f}, acc={accuracy:.4f}")
         
         return loss, {"accuracy": accuracy}
     
