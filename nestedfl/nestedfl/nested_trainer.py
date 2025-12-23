@@ -57,7 +57,10 @@ import gc
 from tqdm import tqdm
 
 # PyTorch 1.x/2.x compatibility (for Jetson Nano)
-from utils.torch_compat import get_autocast, get_grad_scaler
+try:
+    from nestedfl.utils.torch_compat import get_autocast, get_grad_scaler
+except ImportError:
+    from utils.torch_compat import get_autocast, get_grad_scaler
 
 logger = logging.getLogger(__name__)
 
