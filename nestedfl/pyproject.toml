@@ -39,9 +39,10 @@ clientapp = "nestedfl.client_app:app"
 # =====================================================================
 [tool.flwr.app.config]
 # FL Settings
-num-server-rounds = 10
-fraction-train = 1.0
+num-server-rounds = 20
+fraction-train = 0.8      # 80% of clients per round
 fraction-evaluate = 0.5
+min-train-clients = 5     # Minimum 5 clients for aggregation
 
 # Training
 local-epochs = 5
@@ -55,9 +56,10 @@ num-classes = 100
 # Nested Learning Parameters
 fast-lr-mult = 5.0
 slow-update-freq = 5
-use-distillation = false  # Not used in paper (paper uses Multi-Exit Loss only)
+use-distillation = false  # Not used in paper
 cms-enabled = true
-use-lss = true
+use-lss = true            # Local Surprise Signal
+use-dmgd = true           # Deep Momentum GD
 
 # =====================================================================
 # Federations
@@ -65,14 +67,14 @@ use-lss = true
 [tool.flwr.federations]
 default = "local-simulation"
 
-# Local simulation with 3 clients (RTX 4070 optimized)
+# Local simulation with 10 clients
 [tool.flwr.federations.local-simulation]
-options.num-supernodes = 3
+options.num-supernodes = 10
 
-# GPU resource allocation (0.33 GPU per client = 3 clients on 1 GPU)
+# GPU resource allocation (0.1 GPU per client = 10 clients on 1 GPU)
 [tool.flwr.federations.local-simulation.options.backend.client-resources]
 num-cpus = 1
-num-gpus = 0.33
+num-gpus = 0.1
 
 # Remote federation for distributed training
 [tool.flwr.federations.remote-federation]

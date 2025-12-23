@@ -54,9 +54,10 @@ def train_fn(msg: Message, context: Context):
     # Nested Learning parameters
     fast_lr_mult = context.run_config.get("fast-lr-mult", 3.0)
     slow_update_freq = context.run_config.get("slow-update-freq", 5)
-    use_distillation = context.run_config.get("use-distillation", True)
+    use_distillation = context.run_config.get("use-distillation", False)
     cms_enabled = context.run_config.get("cms-enabled", True)
     use_lss = context.run_config.get("use-lss", True)
+    use_dmgd = context.run_config.get("use-dmgd", False)
     
     # Load local data partition
     trainloader, testloader = load_data(
@@ -75,6 +76,7 @@ def train_fn(msg: Message, context: Context):
             use_self_distillation=use_distillation,
             cms_enabled=cms_enabled,
             use_lss=use_lss,
+            use_deep_momentum=use_dmgd,
             fast_lr_multiplier=fast_lr_mult,
             slow_update_freq=slow_update_freq,
         )

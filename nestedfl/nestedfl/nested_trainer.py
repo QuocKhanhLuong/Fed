@@ -602,6 +602,63 @@ class NestedEarlyExitTrainer:
         # Scale by T^2 as per Hinton et al.
         return (kl_loss1 + kl_loss2) * (T ** 2)
     
+    def _apply_deep_momentum_slow(self):
+        """
+        Apply Deep Momentum GD to slow parameter gradients.
+        
+        This modifies the gradients in-place using a learned MLP that
+        combines current gradient with momentum history.
+        """
+        with torch.no_grad():
+            # Initialize deep momentum MLP lazily
+            if self.deep_momentum is None:
+                # Use a smaller dimension for efficiency
+                grad_dim = min(1024, sum(p.numel() for p in self.slow_params if p.grad is not None))
+                self.deep_momentum = DeepMomentum(param_dim=grad_dim).to(self.device)
+                logger.info(f"DMGD initialized: dim={grad_dim}")
+            
+            # Collect gradients from slow params
+            grads = []
+            for p in self.slow_params:
+                if p.grad is not None:
+                    grads.append(p.grad.view(-1))
+            
+            if not grads:
+                return
+            
+            # Concatenate and truncate/pad to fixed size
+            full_grad = torch.cat(grads)
+            target_dim = self.deep_momentum.momentum.shape[0] if self.deep_momentum.momentum is not None else 1024
+            
+            if full_grad.numel() > target_dim:
+                # Sample subset for deep momentum computation
+                indices = torch.randperm(full_grad.numel(), device=self.device)[:target_dim]
+                sampled_grad = full_grad[indices]
+            else:
+                sampled_grad = F.pad(full_grad, (0, target_dim - full_grad.numel()))
+            
+            # Apply deep momentum
+            modified_grad = self.deep_momentum(sampled_grad)
+            
+            # Scale factor for gradient modification (small to maintain stability)
+            scale = 0.1
+            
+            # Apply modification back to original gradients
+            if full_grad.numel() > target_dim:
+                # Only modify sampled positions
+                full_grad[indices] += scale * (modified_grad[:len(indices)] - sampled_grad)
+            else:
+                # Modify all gradients
+                full_grad[:modified_grad.numel()] += scale * (modified_grad[:full_grad.numel()] - sampled_grad[:full_grad.numel()])
+            
+            # Copy modified gradients back
+            offset = 0
+            for p in self.slow_params:
+                if p.grad is not None:
+                    numel = p.grad.numel()
+                    p.grad.copy_(full_grad[offset:offset+numel].view_as(p.grad))
+                    offset += numel
+    
     def train(
         self,
         train_loader: DataLoader,
@@ -698,12 +755,24 @@ class NestedEarlyExitTrainer:
                     # Forward all exits
                     y1, y2, y3 = self.model.forward_all_exits(images)
                     
-                    # Multi-exit CE loss
-                    loss_ce = (
-                        self.exit_weights[0] * F.cross_entropy(y1, labels) +
-                        self.exit_weights[1] * F.cross_entropy(y2, labels) +
-                        self.exit_weights[2] * F.cross_entropy(y3, labels)
+                    # Per-sample losses for LSS
+                    loss1_per_sample = F.cross_entropy(y1, labels, reduction='none')
+                    loss2_per_sample = F.cross_entropy(y2, labels, reduction='none')
+                    loss3_per_sample = F.cross_entropy(y3, labels, reduction='none')
+                    
+                    # Combined per-sample loss (weighted)
+                    combined_per_sample = (
+                        self.exit_weights[0] * loss1_per_sample +
+                        self.exit_weights[1] * loss2_per_sample +
+                        self.exit_weights[2] * loss3_per_sample
                     )
+                    
+                    # Apply LSS weighting (harder samples get more weight)
+                    if self.use_lss:
+                        lss_weights = self.lss.compute_weights(combined_per_sample)
+                        loss_ce = (combined_per_sample * lss_weights).mean()
+                    else:
+                        loss_ce = combined_per_sample.mean()
                     
                     # Self-Distillation loss (Exit3 → Exit1, Exit2)
                     if self.use_self_distillation:
@@ -761,11 +830,21 @@ class NestedEarlyExitTrainer:
                         self.scaler.scale(loss_slow).backward()
                         self.scaler.unscale_(optimizer_slow)
                         torch.nn.utils.clip_grad_norm_(self.slow_params, max_norm=1.0)
+                        
+                        # DMGD: Apply deep momentum to gradients
+                        if self.use_deep_momentum:
+                            self._apply_deep_momentum_slow()
+                        
                         self.scaler.step(optimizer_slow)
                         self.scaler.update()
                     else:
                         loss_slow.backward()
                         torch.nn.utils.clip_grad_norm_(self.slow_params, max_norm=1.0)
+                        
+                        # DMGD: Apply deep momentum to gradients
+                        if self.use_deep_momentum:
+                            self._apply_deep_momentum_slow()
+                        
                         optimizer_slow.step()
                     
                     # ═══════════════════════════════════════════════════════
