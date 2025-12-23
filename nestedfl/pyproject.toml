@@ -55,7 +55,7 @@ num-classes = 100
 # Nested Learning Parameters
 fast-lr-mult = 5.0
 slow-update-freq = 5
-use-distillation = true
+use-distillation = false  # Not used in paper (paper uses Multi-Exit Loss only)
 cms-enabled = true
 use-lss = true
 
