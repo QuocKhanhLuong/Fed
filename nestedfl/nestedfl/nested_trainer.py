@@ -918,17 +918,23 @@ class NestedEarlyExitTrainer:
         
         This is the recommended way to load weights in FL as it ensures
         proper parameter matching by name instead of order.
+        Filters out thop-added keys (total_ops, total_params).
         """
-        self.model.load_state_dict(state_dict, strict=True)
+        # Filter out thop-added keys
+        filtered_dict = {k: v for k, v in state_dict.items() 
+                         if 'total_ops' not in k and 'total_params' not in k}
+        self.model.load_state_dict(filtered_dict, strict=False)
     
     def get_model_state_dict(self) -> dict:
         """
         Get model state_dict for FL aggregation.
+        Filters out thop-added keys (total_ops, total_params).
         
         Returns:
             State dict with parameter names as keys
         """
-        return {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
+        return {k: v.detach().cpu() for k, v in self.model.state_dict().items()
+                if 'total_ops' not in k and 'total_params' not in k}
 
 
 # =============================================================================
