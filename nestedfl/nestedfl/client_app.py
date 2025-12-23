@@ -95,8 +95,8 @@ def train_fn(msg: Message, context: Context):
         
         train_loss = float(metrics.get('loss', 0.0))
         train_acc = float(metrics.get('accuracy', 0.0))
-        fast_steps = int(metrics.get('fast_steps', 0))
-        slow_steps = int(metrics.get('slow_steps', 0))
+        fast_steps = int(metrics.get('fast_updates', 0))
+        slow_steps = int(metrics.get('slow_updates', 0))
         
         logger.info(f"[Client {partition_id}] Nested Train: loss={train_loss:.4f}, acc={train_acc:.4f}, "
                     f"fast={fast_steps}, slow={slow_steps}")
