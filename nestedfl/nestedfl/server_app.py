@@ -50,7 +50,8 @@ def get_evaluate_fn(num_classes: int, dataset: str):
         
         print(f"[Server] Round {server_round}: loss={loss:.4f}, acc={accuracy:.4f}")
         
-        return loss, {"accuracy": accuracy}
+        # Return metrics dict only (Flower 1.18+ format)
+        return {"loss": float(loss), "accuracy": float(accuracy)}
     
     return evaluate_fn
 
