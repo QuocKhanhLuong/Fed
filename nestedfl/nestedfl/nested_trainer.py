@@ -508,6 +508,24 @@ class NestedEarlyExitTrainer:
             'dmgd_enabled': use_deep_momentum,
         }
         
+        # Calculate FLOPs/GFLOPs
+        try:
+            from thop import profile
+            dummy_input = torch.randn(1, 3, 32, 32).to(self.device)
+            flops, params = profile(self.model, inputs=(dummy_input,), verbose=False)
+            self.stats['flops'] = flops
+            self.stats['gflops'] = flops / 1e9
+            self.stats['mflops'] = flops / 1e6
+            logger.info(f"Model FLOPs: {flops/1e6:.2f}M ({flops/1e9:.4f} GFLOPs)")
+        except ImportError:
+            logger.warning("thop not installed - FLOPs calculation skipped. Run: pip install thop")
+            self.stats['flops'] = 0
+            self.stats['gflops'] = 0
+        except Exception as e:
+            logger.warning(f"FLOPs calculation failed: {e}")
+            self.stats['flops'] = 0
+            self.stats['gflops'] = 0
+        
         logger.info(f"NestedEarlyExitTrainer: device={self.device}")
         logger.info(f"Fast params: {self.stats['fast_params']:,} | "
                     f"Slow params: {self.stats['slow_params']:,}")
