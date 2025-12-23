@@ -16,8 +16,12 @@ from nestedfl.task import get_model, load_data, test
 try:
     from nestedfl.nested_trainer import NestedEarlyExitTrainer
     HAS_NESTED_TRAINER = True
-except ImportError:
+except ImportError as e:
     HAS_NESTED_TRAINER = False
+    print(f"WARNING: NestedEarlyExitTrainer import failed: {e}")
+except Exception as e:
+    HAS_NESTED_TRAINER = False
+    print(f"WARNING: NestedEarlyExitTrainer import error: {e}")
 
 logger = logging.getLogger(__name__)
 
