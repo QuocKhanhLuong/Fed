@@ -172,10 +172,12 @@ def train(model, trainloader, epochs: int, lr: float, device):
             optimizer.zero_grad()
             outputs = model(images)
             
-            # Handle early-exit model (returns list of outputs)
+            # Handle early-exit model: returns (logits, exit_indices) tuple
             if isinstance(outputs, (list, tuple)):
-                # Use final exit for training
-                outputs = outputs[-1]
+                if len(outputs) == 2 and outputs[1].dtype == torch.long:
+                    outputs = outputs[0]  # (logits, exit_indices) -> logits
+                else:
+                    outputs = outputs[-1]  # [y1, y2, y3] -> y3
             
             loss = criterion(outputs, labels)
             loss.backward()
@@ -215,9 +217,15 @@ def test(model, testloader, device):
             
             outputs = model(images)
             
-            # Handle early-exit model (returns list of exit outputs)
+            # Handle early-exit model: returns (logits, exit_indices) tuple
+            # or list of [exit1, exit2, exit3] logits from forward_all_exits()
             if isinstance(outputs, (list, tuple)):
-                outputs = outputs[-1]  # Use final exit
+                # If it's (logits, exit_indices) from forward(), take first element
+                # If it's [y1, y2, y3] from forward_all_exits(), take last element
+                if len(outputs) == 2 and outputs[1].dtype == torch.long:
+                    outputs = outputs[0]  # (logits, exit_indices) -> logits
+                else:
+                    outputs = outputs[-1]  # [y1, y2, y3] -> y3
             
             # Ensure outputs are 2D (batch_size, num_classes)
             if outputs.dim() == 1:
