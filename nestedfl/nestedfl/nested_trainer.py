@@ -855,6 +855,24 @@ class NestedEarlyExitTrainer:
         with torch.no_grad():
             for param, value in zip(self.slow_params, parameters):
                 param.copy_(torch.from_numpy(value))
+    
+    def load_model_state_dict(self, state_dict: dict) -> None:
+        """
+        Load model weights from state_dict (proper key-based matching).
+        
+        This is the recommended way to load weights in FL as it ensures
+        proper parameter matching by name instead of order.
+        """
+        self.model.load_state_dict(state_dict, strict=True)
+    
+    def get_model_state_dict(self) -> dict:
+        """
+        Get model state_dict for FL aggregation.
+        
+        Returns:
+            State dict with parameter names as keys
+        """
+        return {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
 
 
 # =============================================================================

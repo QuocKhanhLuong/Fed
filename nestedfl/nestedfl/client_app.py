@@ -79,10 +79,9 @@ def train_fn(msg: Message, context: Context):
             slow_update_freq=slow_update_freq,
         )
         
-        # Load weights from server - convert Tensor to numpy
+        # Load weights from server using state_dict (proper key-based matching)
         state_dict_server = msg.content["arrays"].to_torch_state_dict()
-        params_numpy = [v.cpu().numpy() for v in state_dict_server.values()]
-        trainer.set_parameters(params_numpy)
+        trainer.load_model_state_dict(state_dict_server)
         
         # Train with Nested Learning (DMGD + CMS + LSS)
         metrics = trainer.train(
@@ -91,12 +90,8 @@ def train_fn(msg: Message, context: Context):
             lr=lr,
         )
         
-        # Get updated parameters - convert numpy back to Tensor
-        params_numpy = trainer.get_parameters()
-        state_dict = {k: torch.from_numpy(v) for k, v in zip(
-            state_dict_server.keys(),
-            params_numpy
-        )}
+        # Get updated state_dict for aggregation
+        state_dict = trainer.get_model_state_dict()
         
         train_loss = float(metrics.get('loss', 0.0))
         train_acc = float(metrics.get('accuracy', 0.0))
