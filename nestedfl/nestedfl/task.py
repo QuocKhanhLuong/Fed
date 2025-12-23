@@ -158,8 +158,16 @@ def train(model, trainloader, epochs: int, lr: float, device):
     num_batches = 0
     
     for epoch in range(epochs):
-        for batch_idx, (images, labels) in enumerate(trainloader):
-            images, labels = images.to(device), labels.to(device)
+        for batch in trainloader:
+            # Handle both tuple and dict formats
+            if isinstance(batch, dict):
+                images = batch.get("img", batch.get("image"))
+                labels = batch.get("label", batch.get("labels"))
+            else:
+                images, labels = batch
+            
+            images = images.to(device)
+            labels = labels.to(device).long()  # Ensure Long type
             
             optimizer.zero_grad()
             outputs = model(images)
@@ -194,13 +202,26 @@ def test(model, testloader, device):
     total_loss = 0.0
     
     with torch.no_grad():
-        for images, labels in testloader:
-            images, labels = images.to(device), labels.to(device)
+        for batch in testloader:
+            # Handle both tuple and dict formats
+            if isinstance(batch, dict):
+                images = batch.get("img", batch.get("image"))
+                labels = batch.get("label", batch.get("labels"))
+            else:
+                images, labels = batch
+            
+            images = images.to(device)
+            labels = labels.to(device).long()  # Ensure Long type for CrossEntropyLoss
+            
             outputs = model(images)
             
-            # Handle early-exit model
+            # Handle early-exit model (returns list of exit outputs)
             if isinstance(outputs, (list, tuple)):
-                outputs = outputs[-1]
+                outputs = outputs[-1]  # Use final exit
+            
+            # Ensure outputs are 2D (batch_size, num_classes)
+            if outputs.dim() == 1:
+                outputs = outputs.unsqueeze(0)
             
             loss = criterion(outputs, labels)
             total_loss += loss.item()
