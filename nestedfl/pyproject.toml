@@ -43,8 +43,8 @@ fraction-train = 1.0
 fraction-evaluate = 0.5
 
 # Training
-local-epochs = 3
-lr = 0.001
+local-epochs = 5
+lr = 0.003
 batch-size = 32
 
 # Dataset
@@ -52,7 +52,7 @@ dataset = "cifar100"  # or "cifar10"
 num-classes = 100
 
 # Nested Learning Parameters
-fast-lr-mult = 3.0
+fast-lr-mult = 5.0
 slow-update-freq = 5
 use-distillation = true
 cms-enabled = true

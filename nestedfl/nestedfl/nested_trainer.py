@@ -779,8 +779,23 @@ class NestedEarlyExitTrainer:
             'slow_updates': step_counter // self.slow_update_freq,
         }
         
+        # Add CMS stats if enabled
+        if self.cms.enabled:
+            cms_stats = self.cms.get_memory_stats()
+            metrics.update(cms_stats)
+        
+        # Add LSS stats if enabled
+        if self.use_lss:
+            lss_stats = self.lss.get_stats()
+            metrics.update(lss_stats)
+        
         logger.info(f"NestedTrain: loss={metrics['loss']:.4f}, acc={metrics['accuracy']:.4f}, "
                     f"fast_steps={metrics['fast_updates']}, slow_steps={metrics['slow_updates']}")
+        if self.cms.enabled and 'memory_0_norm' in metrics:
+            logger.info(f"  CMS Memory norms: {[f'{metrics.get(f\"memory_{i}_norm\", 0):.2f}' for i in range(4)]}")
+        if self.use_lss and 'lss_running_mean' in metrics:
+            logger.info(f"  LSS running mean loss: {metrics.get('lss_running_mean', 0):.4f}")
+        
         return metrics
     
     def _get_slow_param_indices(self) -> List[int]:
