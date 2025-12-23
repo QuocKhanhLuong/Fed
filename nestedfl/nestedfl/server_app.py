@@ -2,7 +2,7 @@
 nestedfl: Nested Early-Exit Federated Learning ServerApp
 
 Flower 1.18+ Message API implementation for centralized FL coordination
-with FedAvg/FedDyn aggregation.
+with FedAvg/FedProx aggregation.
 """
 
 import json
@@ -13,7 +13,7 @@ from pathlib import Path
 import torch
 from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.serverapp import Grid, ServerApp
-from flwr.serverapp.strategy import FedAvg
+from flwr.serverapp.strategy import FedAvg, FedProx
 
 # Setup logging (creates timestamped log file)
 from nestedfl.logging_config import setup_logging, get_log_file
@@ -62,7 +62,7 @@ def main(grid: Grid, context: Context) -> None:
     Main entry point for the ServerApp.
     
     Orchestrates federated learning with:
-    - FedAvg aggregation
+    - FedAvg or FedProx aggregation (configurable)
     - Centralized evaluation
     - Result saving
     """
@@ -74,12 +74,31 @@ def main(grid: Grid, context: Context) -> None:
     dataset: str = context.run_config.get("dataset", "cifar100")
     num_classes = 100 if dataset == "cifar100" else 10
     
+    # Strategy selection
+    strategy_name: str = context.run_config.get("strategy", "fedprox")
+    proximal_mu: float = context.run_config.get("proximal-mu", 0.1)  # FedProx regularization
+    
+    # Nested Learning config
+    fast_lr_mult: float = context.run_config.get("fast-lr-mult", 3.0)
+    slow_update_freq: int = context.run_config.get("slow-update-freq", 5)
+    use_distillation: bool = context.run_config.get("use-distillation", True)
+    cms_enabled: bool = context.run_config.get("cms-enabled", True)
+    use_lss: bool = context.run_config.get("use-lss", True)
+    
     print(f"\n{'='*60}")
     print(f"Nested Early-Exit Federated Learning")
     print(f"{'='*60}")
     print(f"Dataset: {dataset} ({num_classes} classes)")
+    print(f"Strategy: {strategy_name.upper()}" + (f" (μ={proximal_mu})" if strategy_name == "fedprox" else ""))
     print(f"Rounds: {num_rounds}")
     print(f"Learning rate: {lr}")
+    print(f"")
+    print(f"Nested Learning Features:")
+    print(f"  - Fast LR Multiplier: {fast_lr_mult}")
+    print(f"  - Slow Update Freq (K): {slow_update_freq}")
+    print(f"  - Self-Distillation: {use_distillation}")
+    print(f"  - CMS (Memory): {cms_enabled}")
+    print(f"  - LSS (Surprise): {use_lss}")
     print(f"{'='*60}\n")
     
     # Load global model
@@ -88,17 +107,26 @@ def main(grid: Grid, context: Context) -> None:
     
     print(f"Global model initialized: {sum(p.numel() for p in global_model.parameters())} parameters")
     
-    # Initialize FedAvg strategy with centralized evaluation
-    strategy = FedAvg(
-        fraction_train=fraction_train,
-        fraction_evaluate=fraction_eval,
-    )
+    # Initialize strategy based on config
+    if strategy_name.lower() == "fedprox":
+        strategy = FedProx(
+            fraction_train=fraction_train,
+            fraction_evaluate=fraction_eval,
+            proximal_mu=proximal_mu,
+        )
+        print(f"Using FedProx strategy with μ={proximal_mu}")
+    else:
+        strategy = FedAvg(
+            fraction_train=fraction_train,
+            fraction_evaluate=fraction_eval,
+        )
+        print(f"Using FedAvg strategy")
     
-    # Start strategy, run FedAvg for `num_rounds`
+    # Start strategy
     result = strategy.start(
         grid=grid,
         initial_arrays=arrays,
-        train_config=ConfigRecord({"lr": lr}),
+        train_config=ConfigRecord({"lr": lr, "proximal_mu": proximal_mu}),
         num_rounds=num_rounds,
         evaluate_fn=get_evaluate_fn(num_classes, dataset),
     )
@@ -108,20 +136,29 @@ def main(grid: Grid, context: Context) -> None:
     results_dir.mkdir(exist_ok=True)
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_path = results_dir / f"model_{dataset}_{timestamp}.pt"
+    model_path = results_dir / f"model_{dataset}_{strategy_name}_{timestamp}.pt"
     
     print(f"\nSaving final model to {model_path}...")
     state_dict = result.arrays.to_torch_state_dict()
     torch.save(state_dict, model_path)
     
     # Save metrics
-    metrics_path = results_dir / f"metrics_{dataset}_{timestamp}.json"
+    metrics_path = results_dir / f"metrics_{dataset}_{strategy_name}_{timestamp}.json"
     metrics_data = {
         "timestamp": datetime.now().isoformat(),
         "config": {
             "dataset": dataset,
+            "strategy": strategy_name,
+            "proximal_mu": proximal_mu,
             "num_rounds": num_rounds,
             "lr": lr,
+            "nested_learning": {
+                "fast_lr_mult": fast_lr_mult,
+                "slow_update_freq": slow_update_freq,
+                "use_distillation": use_distillation,
+                "cms_enabled": cms_enabled,
+                "use_lss": use_lss,
+            },
         },
         "history": {
             "train_metrics": [],  # Would be populated from result
