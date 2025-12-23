@@ -832,7 +832,8 @@ class NestedEarlyExitTrainer:
         logger.info(f"NestedTrain: loss={metrics['loss']:.4f}, acc={metrics['accuracy']:.4f}, "
                     f"fast_steps={metrics['fast_updates']}, slow_steps={metrics['slow_updates']}")
         if self.cms.enabled and 'memory_0_norm' in metrics:
-            logger.info(f"  CMS Memory norms: {[f'{metrics.get(f\"memory_{i}_norm\", 0):.2f}' for i in range(4)]}")
+            mem_norms = [f"{metrics.get('memory_' + str(i) + '_norm', 0):.2f}" for i in range(4)]
+            logger.info(f"  CMS Memory norms: {mem_norms}")
         if self.use_lss and 'lss_running_mean' in metrics:
             logger.info(f"  LSS running mean loss: {metrics.get('lss_running_mean', 0):.4f}")
         
