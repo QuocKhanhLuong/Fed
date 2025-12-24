@@ -59,7 +59,7 @@ slow-update-freq = 5
 use-distillation = false  # Not used in paper
 cms-enabled = false       # DISABLED: EWC-like regularization suppresses learning
 use-lss = true            # Re-enabled: now synced between fast/slow updates
-use-dmgd = false          # DISABLED: needs meta-learning to work properly
+use-dmgd = true           # Official DeepMomentumGD from nested-learning library
 
 # =====================================================================
 # Federations

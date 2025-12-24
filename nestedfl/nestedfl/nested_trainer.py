@@ -704,11 +704,35 @@ class NestedEarlyExitTrainer:
             lr=learning_rate * self.fast_lr_multiplier,  # η_fast = 10x
             weight_decay=0.01,
         )
-        optimizer_slow = torch.optim.AdamW(
-            self.slow_params,
-            lr=learning_rate,  # η_slow = 1x
-            weight_decay=0.01,
-        )
+        
+        # Use DeepMomentumGD for slow weights if enabled
+        if self.use_deep_momentum:
+            try:
+                from nestedfl.nested_learning.optimizers import DeepMomentumGD
+                optimizer_slow = DeepMomentumGD(
+                    params=self.slow_params,
+                    lr=learning_rate,
+                    momentum=0.9,
+                    memory_lr=1e-4,
+                    use_shared_memory=True,
+                    gradient_checkpointing=True,
+                    use_factorized_memory=True,
+                    internal_loss_mode='surrogate',  # Paper: cosine + magnitude + temporal
+                )
+                logger.info("Using DeepMomentumGD for slow weights (official nested-learning)")
+            except ImportError as e:
+                logger.warning(f"DeepMomentumGD not available: {e}, falling back to AdamW")
+                optimizer_slow = torch.optim.AdamW(
+                    self.slow_params,
+                    lr=learning_rate,
+                    weight_decay=0.01,
+                )
+        else:
+            optimizer_slow = torch.optim.AdamW(
+                self.slow_params,
+                lr=learning_rate,  # η_slow = 1x
+                weight_decay=0.01,
+            )
         
         # Cosine Annealing + Linear Warmup Scheduler (MobileViT official)
         scheduler_fast = None
@@ -853,21 +877,13 @@ class NestedEarlyExitTrainer:
                         self.scaler.scale(loss_slow).backward()
                         self.scaler.unscale_(optimizer_slow)
                         torch.nn.utils.clip_grad_norm_(self.slow_params, max_norm=1.0)
-                        
-                        # DMGD: Apply deep momentum to gradients
-                        if self.use_deep_momentum:
-                            self._apply_deep_momentum_slow()
-                        
+                        # DeepMomentumGD handles memory/momentum internally
                         self.scaler.step(optimizer_slow)
                         self.scaler.update()
                     else:
                         loss_slow.backward()
                         torch.nn.utils.clip_grad_norm_(self.slow_params, max_norm=1.0)
-                        
-                        # DMGD: Apply deep momentum to gradients
-                        if self.use_deep_momentum:
-                            self._apply_deep_momentum_slow()
-                        
+                        # DeepMomentumGD handles memory/momentum internally
                         optimizer_slow.step()
                     
                     # ═══════════════════════════════════════════════════════
