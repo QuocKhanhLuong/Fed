@@ -57,7 +57,7 @@ num-classes = 100
 fast-lr-mult = 3.0        # Reduced from 5.0 for better stability with Non-IID
 slow-update-freq = 5
 use-distillation = false  # Not used in paper
-cms-enabled = false       # DISABLED: EWC-like regularization suppresses learning
+cms-enabled = true       # ENABLED: EWC-like regularization suppresses learning
 use-lss = true            # Re-enabled: now synced between fast/slow updates
 use-dmgd = true           # Official DeepMomentumGD from nested-learning library
 
