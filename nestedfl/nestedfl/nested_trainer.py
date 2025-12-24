@@ -116,6 +116,9 @@ class LocalSurpriseSignal:
         if not self.enabled:
             return torch.ones_like(per_sample_loss)
         
+        # Clamp losses to prevent extreme values
+        per_sample_loss = per_sample_loss.clamp(min=1e-6, max=100.0)
+        
         # Update running mean
         batch_mean = per_sample_loss.mean().detach()
         if self.running_mean_loss is None:
@@ -128,10 +131,18 @@ class LocalSurpriseSignal:
         
         # Compute normalized surprise (LSS)
         # Higher loss = more surprising = higher weight
-        lss = per_sample_loss / (self.running_mean_loss + 1e-8)
+        lss = per_sample_loss / (self.running_mean_loss + 1e-6)
         
-        # Apply temperature and normalize
-        weights = torch.softmax(lss / self.temperature, dim=0) * len(lss)
+        # Clamp LSS to prevent extreme outliers from dominating
+        lss = lss.clamp(min=0.1, max=10.0)
+        
+        # Apply temperature (higher = more uniform weights)
+        # Use higher temperature (2.0) for stability
+        temp = max(self.temperature, 2.0)
+        weights = torch.softmax(lss / temp, dim=0) * len(lss)
+        
+        # Additional clamp on final weights
+        weights = weights.clamp(min=0.1, max=5.0)
         
         return weights.detach()
     
@@ -801,13 +812,26 @@ class NestedEarlyExitTrainer:
                     optimizer_slow.zero_grad(set_to_none=True)
                     
                     with get_autocast('cuda', enabled=self.use_amp):
-                        # Recompute loss for slow weights
+                        # Recompute loss for slow weights (use same LSS weights as fast)
                         y1, y2, y3 = self.model.forward_all_exits(images)
-                        loss_slow = (
-                            self.exit_weights[0] * F.cross_entropy(y1, labels) +
-                            self.exit_weights[1] * F.cross_entropy(y2, labels) +
-                            self.exit_weights[2] * F.cross_entropy(y3, labels)
+                        
+                        # Per-sample losses (same as fast update)
+                        loss1_ps = F.cross_entropy(y1, labels, reduction='none')
+                        loss2_ps = F.cross_entropy(y2, labels, reduction='none')
+                        loss3_ps = F.cross_entropy(y3, labels, reduction='none')
+                        combined_ps = (
+                            self.exit_weights[0] * loss1_ps +
+                            self.exit_weights[1] * loss2_ps +
+                            self.exit_weights[2] * loss3_ps
                         )
+                        
+                        # Apply same LSS weighting for consistency
+                        if self.use_lss:
+                            # Reuse weights from fast loop (already computed)
+                            lss_w = self.lss.compute_weights(combined_ps)
+                            loss_slow = (combined_ps * lss_w).mean()
+                        else:
+                            loss_slow = combined_ps.mean()
                         
                         # FedProx regularization (only on slow/backbone weights)
                         if fedprox_mu > 0 and w_global_slow is not None:
@@ -817,14 +841,13 @@ class NestedEarlyExitTrainer:
                             )
                             loss_slow += (fedprox_mu / 2) * prox_term
                         
-                        # ═══════════════════════════════════════════════════
-                        # CMS: Memory Regularization Loss
-                        # ═══════════════════════════════════════════════════
-                        if self.cms.enabled:
-                            # Flatten slow weights for CMS
+                        # CMS: Disabled by default - causes issues similar to EWC
+                        # Only enable if cms_weight > 0 and after sufficient warmup
+                        if self.cms.enabled and step_counter > 100:
                             slow_tensor = torch.cat([p.view(-1) for p in self.slow_params])
                             loss_memory = self.cms.get_memory_loss(slow_tensor)
-                            loss_slow = loss_slow + loss_memory
+                            # Use very small weight to avoid suppressing learning
+                            loss_slow = loss_slow + 0.001 * loss_memory
                     
                     if self.scaler is not None:
                         self.scaler.scale(loss_slow).backward()
