@@ -717,9 +717,9 @@ class NestedEarlyExitTrainer:
                     use_shared_memory=True,
                     gradient_checkpointing=True,
                     use_factorized_memory=True,
-                    internal_loss_mode='surrogate',  # Paper: cosine + magnitude + temporal
+                    internal_loss_mode='l2_regression',  # Paper-exact (Eq 21-23)
                 )
-                logger.info("Using DeepMomentumGD for slow weights (official nested-learning)")
+                logger.info("Using DeepMomentumGD (l2_regression mode - paper-exact)")
             except ImportError as e:
                 logger.warning(f"DeepMomentumGD not available: {e}, falling back to AdamW")
                 optimizer_slow = torch.optim.AdamW(
@@ -865,13 +865,9 @@ class NestedEarlyExitTrainer:
                             )
                             loss_slow += (fedprox_mu / 2) * prox_term
                         
-                        # CMS: Disabled by default - causes issues similar to EWC
-                        # Only enable if cms_weight > 0 and after sufficient warmup
-                        if self.cms.enabled and step_counter > 100:
-                            slow_tensor = torch.cat([p.view(-1) for p in self.slow_params])
-                            loss_memory = self.cms.get_memory_loss(slow_tensor)
-                            # Use very small weight to avoid suppressing learning
-                            loss_slow = loss_slow + 0.001 * loss_memory
+                        # NOTE: CMS is now handled via official ContinuumMemorySystem from
+                        # nested-learning library as an architecture component, not as
+                        # regularization loss. See nl_integration.py for usage.
                     
                     if self.scaler is not None:
                         self.scaler.scale(loss_slow).backward()
@@ -886,13 +882,8 @@ class NestedEarlyExitTrainer:
                         # DeepMomentumGD handles memory/momentum internally
                         optimizer_slow.step()
                     
-                    # ═══════════════════════════════════════════════════════
-                    # CMS: Update Memory Buffers (after optimizer step)
-                    # ═══════════════════════════════════════════════════════
-                    if self.cms.enabled:
-                        with torch.no_grad():
-                            slow_tensor = torch.cat([p.view(-1) for p in self.slow_params])
-                            self.cms.update(slow_tensor, step_counter)
+                    # NOTE: CMS update removed - using official ContinuumMemorySystem
+                    # from nested-learning library as architecture component
                 
                 # Accumulate metrics
                 total_loss += loss_fast.item() * labels.size(0)
