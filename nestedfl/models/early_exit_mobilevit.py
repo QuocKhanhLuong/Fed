@@ -567,22 +567,23 @@ class TimmPretrainedEarlyExit(nn.Module):
                     if m.bias is not None:
                         nn.init.zeros_(m.bias)
         
-        # CMS: Continuum Memory System for multi-frequency feature processing
-        # Using residual mode for training stability (use_residual=True)
+        # CMS: FullyNestedCMS for paper-exact multi-frequency processing
+        # Implements Equation 30: y_t = MLP^(f_k)(...MLP^(f_1)(x_t))
         try:
-            from nestedfl.nested_learning.memory import ContinuumMemorySystem
-            # CMS layer after final backbone features (before exit3)
-            self.cms = ContinuumMemorySystem(
+            from nestedfl.nested_learning.memory import FullyNestedCMS
+            # FullyNestedCMS layer (paper-exact, no residual)
+            self.cms = FullyNestedCMS(
                 dim=feature_dims[3],  # Final feature dim (384)
                 num_levels=3,
                 chunk_sizes=[8, 32, 128],  # Multi-frequency update schedule
+                use_residual=False,  # Paper-exact: true nesting
             )
             self.use_cms = True
-            logger.info(f"CMS layer added: dim={feature_dims[3]}, levels=3 (residual mode)")
+            logger.info(f"FullyNestedCMS (Eq 30) added: dim={feature_dims[3]}, levels=3")
         except ImportError:
             self.cms = None
             self.use_cms = False
-            logger.warning("CMS not available - continuing without")
+            logger.warning("FullyNestedCMS not available")
         
         # Optionally freeze backbone
         if freeze_backbone:
