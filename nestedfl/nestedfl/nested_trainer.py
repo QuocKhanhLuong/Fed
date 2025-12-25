@@ -729,17 +729,7 @@ class NestedEarlyExitTrainer:
         # Use DeepMomentumGD for slow weights if enabled
         if self.use_deep_momentum:
             try:
-                # Try absolute import first
-                try:
-                    from nestedfl.nested_learning.optimizers import DeepMomentumGD
-                except ImportError:
-                    # Fallback: add parent directory to path
-                    import sys
-                    import os
-                    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    if parent_dir not in sys.path:
-                        sys.path.insert(0, parent_dir)
-                    from nestedfl.nested_learning.optimizers import DeepMomentumGD
+                from nested_learning.optimizers import DeepMomentumGD
                 
                 optimizer_slow = DeepMomentumGD(
                     params=self.slow_params,

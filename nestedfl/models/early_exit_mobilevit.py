@@ -570,17 +570,7 @@ class TimmPretrainedEarlyExit(nn.Module):
         # CMS: FullyNestedCMS for paper-exact multi-frequency processing
         # Implements Equation 30: y_t = MLP^(f_k)(...MLP^(f_1)(x_t))
         try:
-            # First try: absolute import (when running from nestedfl/)
-            try:
-                from nestedfl.nested_learning.memory import FullyNestedCMS
-            except ImportError:
-                # Fallback: try adding parent to path
-                import sys
-                import os
-                parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                if parent_dir not in sys.path:
-                    sys.path.insert(0, parent_dir)
-                from nestedfl.nested_learning.memory import FullyNestedCMS
+            from nested_learning.memory import FullyNestedCMS
             
             # FullyNestedCMS layer (paper-exact, no residual)
             self.cms = FullyNestedCMS(
