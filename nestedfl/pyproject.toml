@@ -53,13 +53,13 @@ batch-size = 32
 dataset = "cifar100"  # or "cifar10"
 num-classes = 100
 
-# Nested Learning Parameters (Q1 Journal Features)
-fast-lr-mult = 3.0        # Reduced from 5.0 for better stability with Non-IID
-slow-update-freq = 5      # Will decrease adaptively (5→2 over training)
-use-distillation = true   # ENABLED: Exit3 teaches Exit1/2 (weight=0.3)
-distillation-weight = 0.3 # Increased from 0.1 for stronger knowledge transfer
-cms-enabled = true        # CMS architecture layer
-use-lss = true            # Gradient-based surprise signal (synced fast/slow)
+# Nested Learning Parameters (Stability Mode)
+fast-lr-mult = 3.0        # Stable with Non-IID
+slow-update-freq = 5      # Fixed for stability
+use-distillation = false  # DISABLED: may cause instability with new features
+distillation-weight = 0.3 
+cms-enabled = true        # CMS with residual mode for stability
+use-lss = true            # LSS with adaptive temp
 use-dmgd = true           # DeepMomentumGD (l2_regression mode)
 
 # =====================================================================
