@@ -838,9 +838,18 @@ class NestedEarlyExitTrainer:
                 
                 # ═══════════════════════════════════════════════════════
                 # OUTER LOOP: Slow Update (every K steps)
+                # Adaptive K: decreases from initial to 2 as training progresses
                 # ═══════════════════════════════════════════════════════
                 step_counter += 1
-                if step_counter % self.slow_update_freq == 0:
+                
+                # Adaptive slow update frequency: 5→2 over training
+                # Early training: K=5 (stabilize global knowledge)
+                # Late training: K=2 (fine-tune backbone deeply)
+                total_steps = epochs * len(train_loader)
+                progress = step_counter / max(total_steps, 1)
+                adaptive_k = max(2, int(self.slow_update_freq * (1 - 0.6 * progress)))  # 5→2
+                
+                if step_counter % adaptive_k == 0:
                     optimizer_slow.zero_grad(set_to_none=True)
                     
                     with get_autocast('cuda', enabled=self.use_amp):

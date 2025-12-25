@@ -55,6 +55,7 @@ def train_fn(msg: Message, context: Context):
     fast_lr_mult = context.run_config.get("fast-lr-mult", 3.0)
     slow_update_freq = context.run_config.get("slow-update-freq", 5)
     use_distillation = context.run_config.get("use-distillation", False)
+    distillation_weight = context.run_config.get("distillation-weight", 0.3)
     cms_enabled = context.run_config.get("cms-enabled", True)
     use_lss = context.run_config.get("use-lss", True)
     use_dmgd = context.run_config.get("use-dmgd", False)
@@ -74,6 +75,7 @@ def train_fn(msg: Message, context: Context):
             use_mixed_precision=True,
             use_timm_pretrained=True,
             use_self_distillation=use_distillation,
+            distillation_weight=distillation_weight,
             cms_enabled=cms_enabled,
             use_lss=use_lss,
             use_deep_momentum=use_dmgd,

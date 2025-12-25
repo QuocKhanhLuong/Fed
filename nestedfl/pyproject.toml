@@ -53,13 +53,14 @@ batch-size = 32
 dataset = "cifar100"  # or "cifar10"
 num-classes = 100
 
-# Nested Learning Parameters (Fixed based on paper analysis)
+# Nested Learning Parameters (Q1 Journal Features)
 fast-lr-mult = 3.0        # Reduced from 5.0 for better stability with Non-IID
-slow-update-freq = 5
-use-distillation = false  # Not used in paper
-cms-enabled = true       # ENABLED: EWC-like regularization suppresses learning
-use-lss = true            # Re-enabled: now synced between fast/slow updates
-use-dmgd = true           # Official DeepMomentumGD from nested-learning library
+slow-update-freq = 5      # Will decrease adaptively (5→2 over training)
+use-distillation = true   # ENABLED: Exit3 teaches Exit1/2 (weight=0.3)
+distillation-weight = 0.3 # Increased from 0.1 for stronger knowledge transfer
+cms-enabled = true        # CMS architecture layer
+use-lss = true            # Gradient-based surprise signal (synced fast/slow)
+use-dmgd = true           # DeepMomentumGD (l2_regression mode)
 
 # =====================================================================
 # Federations
