@@ -162,6 +162,29 @@ def main(grid: Grid, context: Context) -> None:
     
     # Save metrics
     metrics_path = results_dir / f"metrics_{dataset}_{strategy_name}_{timestamp}.json"
+    
+    # Extract metrics from result (train and eval)
+    train_history = []
+    eval_history = []
+    
+    # Get metrics from result if available
+    if hasattr(result, 'metrics') and result.metrics:
+        # Direct metrics from result
+        for key, value in result.metrics.items():
+            if 'train' in key.lower():
+                train_history.append({key: value})
+            elif 'eval' in key.lower() or 'acc' in key.lower() or 'loss' in key.lower():
+                eval_history.append({key: value})
+    
+    # Try to get history from strategy if available  
+    if hasattr(result, 'history'):
+        if hasattr(result.history, 'metrics_distributed_fit'):
+            for round_num, metrics in enumerate(result.history.metrics_distributed_fit, 1):
+                train_history.append({"round": round_num, **metrics})
+        if hasattr(result.history, 'metrics_distributed'):
+            for round_num, metrics in enumerate(result.history.metrics_distributed, 1):
+                eval_history.append({"round": round_num, **metrics})
+    
     metrics_data = {
         "timestamp": datetime.now().isoformat(),
         "config": {
@@ -179,8 +202,8 @@ def main(grid: Grid, context: Context) -> None:
             },
         },
         "history": {
-            "train_metrics": [],  # Would be populated from result
-            "eval_metrics": [],
+            "train_metrics": train_history,
+            "eval_metrics": eval_history,
         }
     }
     
