@@ -537,35 +537,75 @@ class TimmPretrainedEarlyExit(nn.Module):
         feature_dims = self.backbone.feature_info.channels()
         logger.info(f"Backbone feature dims: {feature_dims}")
         
-        # Early Exit heads at different stages
-        # Exit 1: After stage 2 (128 channels)
-        self.exit1 = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(feature_dims[1], num_classes),
-        )
+        # Early Exit heads at different stages with NestedCMS integration
+        # Each exit has: Pool → Flatten → CMS → Linear
+        # This creates true nested architecture in the classifier heads
         
-        # Exit 2: After stage 3 (256 channels)
-        self.exit2 = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(feature_dims[2], num_classes),
-        )
+        try:
+            from nested_learning.memory import FullyNestedCMS
+            
+            # Exit 1: After stage 2 (128 channels) with CMS
+            self.exit1_pool = nn.AdaptiveAvgPool2d(1)
+            self.exit1_cms = FullyNestedCMS(
+                dim=feature_dims[1], 
+                num_levels=2, 
+                use_residual=True
+            )
+            self.exit1_fc = nn.Linear(feature_dims[1], num_classes)
+            
+            # Exit 2: After stage 3 (256 channels) with CMS
+            self.exit2_pool = nn.AdaptiveAvgPool2d(1)
+            self.exit2_cms = FullyNestedCMS(
+                dim=feature_dims[2], 
+                num_levels=2, 
+                use_residual=True
+            )
+            self.exit2_fc = nn.Linear(feature_dims[2], num_classes)
+            
+            # Exit 3 (final): After stage 4 (384 channels) with CMS
+            self.exit3_pool = nn.AdaptiveAvgPool2d(1)
+            self.exit3_cms = FullyNestedCMS(
+                dim=feature_dims[3], 
+                num_levels=3, 
+                use_residual=True
+            )
+            self.exit3_fc = nn.Linear(feature_dims[3], num_classes)
+            
+            self.use_nested_exits = True
+            logger.info(f"✓ NestedCMS exit heads: E1={feature_dims[1]}, E2={feature_dims[2]}, E3={feature_dims[3]}")
+            
+        except ImportError:
+            # Fallback: Simple exit heads without CMS
+            self.exit1 = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(feature_dims[1], num_classes),
+            )
+            self.exit2 = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(feature_dims[2], num_classes),
+            )
+            self.exit3 = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(feature_dims[3], num_classes),
+            )
+            self.use_nested_exits = False
+            logger.warning("FullyNestedCMS not available, using simple exit heads")
         
-        # Exit 3 (final): After stage 4 (384 channels)
-        self.exit3 = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(feature_dims[3], num_classes),
-        )
-        
-        # Initialize exit heads
-        for exit_module in [self.exit1, self.exit2, self.exit3]:
-            for m in exit_module.modules():
-                if isinstance(m, nn.Linear):
-                    nn.init.xavier_uniform_(m.weight)
-                    if m.bias is not None:
-                        nn.init.zeros_(m.bias)
+        # Initialize exit head linear layers
+        if self.use_nested_exits:
+            for fc in [self.exit1_fc, self.exit2_fc, self.exit3_fc]:
+                nn.init.xavier_uniform_(fc.weight)
+                nn.init.zeros_(fc.bias)
+        else:
+            for exit_module in [self.exit1, self.exit2, self.exit3]:
+                for m in exit_module.modules():
+                    if isinstance(m, nn.Linear):
+                        nn.init.xavier_uniform_(m.weight)
+                        if m.bias is not None:
+                            nn.init.zeros_(m.bias)
         
         # CMS: FullyNestedCMS for paper-exact multi-frequency processing
         # Implements Equation 30: y_t = MLP^(f_k)(...MLP^(f_1)(x_t))
@@ -600,24 +640,42 @@ class TimmPretrainedEarlyExit(nn.Module):
         features = self.backbone(x)
         # features is a list: [stage0, stage1, stage2, stage3, stage4]
         
-        # Apply CMS to final features for multi-frequency processing
-        if self.use_cms and self.cms is not None:
-            # Move CMS to same device as features (handles CUDA case)
-            device = features[3].device
-            if next(self.cms.parameters()).device != device:
-                self.cms = self.cms.to(device)
+        if hasattr(self, 'use_nested_exits') and self.use_nested_exits:
+            # Nested CMS exit heads: Pool → CMS → Linear
+            device = features[1].device
             
-            # CMS expects (batch, seq_len, dim) but we have (batch, channels, h, w)
-            # Reshape: (B, C, H, W) -> (B, H*W, C) for CMS -> back to (B, C, H, W)
-            B, C, H, W = features[3].shape
-            feat_reshaped = features[3].permute(0, 2, 3, 1).reshape(B, H*W, C)
-            feat_cms = self.cms(feat_reshaped)
-            features[3] = feat_cms.reshape(B, H, W, C).permute(0, 3, 1, 2)
-        
-        # Early exits from intermediate stages
-        y1 = self.exit1(features[1])  # After stage 1
-        y2 = self.exit2(features[2])  # After stage 2
-        y3 = self.exit3(features[3])  # After stage 3 + CMS
+            # Exit 1: features[1] -> pool -> cms -> fc
+            f1 = self.exit1_pool(features[1]).flatten(1)  # (B, C)
+            self.exit1_cms = self.exit1_cms.to(device)
+            f1 = self.exit1_cms(f1.unsqueeze(1)).squeeze(1)  # CMS expects (B, seq, dim)
+            y1 = self.exit1_fc(f1)
+            
+            # Exit 2: features[2] -> pool -> cms -> fc
+            f2 = self.exit2_pool(features[2]).flatten(1)
+            self.exit2_cms = self.exit2_cms.to(device)
+            f2 = self.exit2_cms(f2.unsqueeze(1)).squeeze(1)
+            y2 = self.exit2_fc(f2)
+            
+            # Exit 3: features[3] -> pool -> cms -> fc
+            f3 = self.exit3_pool(features[3]).flatten(1)
+            self.exit3_cms = self.exit3_cms.to(device)
+            f3 = self.exit3_cms(f3.unsqueeze(1)).squeeze(1)
+            y3 = self.exit3_fc(f3)
+        else:
+            # Simple exit heads (fallback)
+            # Apply CMS to final features if available
+            if hasattr(self, 'use_cms') and self.use_cms and self.cms is not None:
+                device = features[3].device
+                if next(self.cms.parameters()).device != device:
+                    self.cms = self.cms.to(device)
+                B, C, H, W = features[3].shape
+                feat_reshaped = features[3].permute(0, 2, 3, 1).reshape(B, H*W, C)
+                feat_cms = self.cms(feat_reshaped)
+                features[3] = feat_cms.reshape(B, H, W, C).permute(0, 3, 1, 2)
+            
+            y1 = self.exit1(features[1])
+            y2 = self.exit2(features[2])
+            y3 = self.exit3(features[3])
         
         return y1, y2, y3
     

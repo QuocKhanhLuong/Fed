@@ -154,11 +154,11 @@ class LocalSurpriseSignal:
         # Clamp LSS to prevent extreme outliers from dominating
         lss = lss.clamp(min=0.1, max=10.0)
         
-        # Adaptive temperature: increases linearly from 2.0 to 5.0
-        # Early training (progress=0): temp=2.0 → focus on hard samples
-        # Late training (progress=1): temp=5.0 → more uniform learning
-        base_temp = max(self.temperature, 2.0)
-        temp = base_temp + 3.0 * progress  # 2.0 → 5.0
+        # Adaptive temperature: increases linearly from 1.0 to 3.0
+        # Early training (progress=0): temp=1.0 → strong focus on hard samples
+        # Late training (progress=1): temp=3.0 → more uniform learning
+        base_temp = max(self.temperature, 1.0)
+        temp = base_temp + 2.0 * progress  # 1.0 → 3.0
         
         weights = torch.softmax(lss / temp, dim=0) * len(lss)
         
