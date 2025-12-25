@@ -572,11 +572,17 @@ class DeepMomentumGD(Optimizer):
         output_dim = memory_output.shape[0]
         input_dim = min(grad.shape[0], output_dim)  # Handle dimension mismatch
 
-        # Initialize projection matrix if needed
+        # Initialize projection matrix if needed OR if dimensions changed
         if bucket_size not in self._l2_projections:
             # Initialize P as scaled identity to start near identity transform
             P = torch.eye(output_dim, input_dim, device=device, dtype=dtype) * 0.1
             self._l2_projections[bucket_size] = P
+        else:
+            P = self._l2_projections[bucket_size]
+            # Check if P dimensions match, reinitialize if not
+            if P.shape[0] != output_dim or P.shape[1] != input_dim:
+                P = torch.eye(output_dim, input_dim, device=device, dtype=dtype) * 0.1
+                self._l2_projections[bucket_size] = P
 
         P = self._l2_projections[bucket_size]
 
