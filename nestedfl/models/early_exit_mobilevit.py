@@ -602,6 +602,11 @@ class TimmPretrainedEarlyExit(nn.Module):
         
         # Apply CMS to final features for multi-frequency processing
         if self.use_cms and self.cms is not None:
+            # Move CMS to same device as features (handles CUDA case)
+            device = features[3].device
+            if next(self.cms.parameters()).device != device:
+                self.cms = self.cms.to(device)
+            
             # CMS expects (batch, seq_len, dim) but we have (batch, channels, h, w)
             # Reshape: (B, C, H, W) -> (B, H*W, C) for CMS -> back to (B, C, H, W)
             B, C, H, W = features[3].shape
