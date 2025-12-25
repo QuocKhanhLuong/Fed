@@ -517,6 +517,21 @@ class TimmPretrainedEarlyExit(nn.Module):
             features_only=True,  # Return intermediate features
         )
         
+        # CIFAR-100 fix: Reduce stem stride for 32x32 images
+        # MobileViT was designed for 224x224, stem stride=2 loses too much spatial info
+        # for small images. Change stride from 2 to 1 to preserve spatial details.
+        if hasattr(self.backbone, 'conv_stem'):
+            original_stride = self.backbone.conv_stem.stride
+            self.backbone.conv_stem.stride = (1, 1)
+            logger.info(f"CIFAR fix: conv_stem stride {original_stride} → (1, 1)")
+        elif hasattr(self.backbone, 'stem'):
+            # Some timm models use 'stem' instead of 'conv_stem'
+            for module in self.backbone.stem.modules():
+                if isinstance(module, nn.Conv2d) and module.stride == (2, 2):
+                    module.stride = (1, 1)
+                    logger.info(f"CIFAR fix: stem conv stride (2, 2) → (1, 1)")
+                    break
+        
         # Get feature dimensions from backbone
         # MobileViTv2_100 stages output: [64, 128, 256, 384, 512]
         feature_dims = self.backbone.feature_info.channels()
@@ -552,6 +567,23 @@ class TimmPretrainedEarlyExit(nn.Module):
                     if m.bias is not None:
                         nn.init.zeros_(m.bias)
         
+        # CMS: Continuum Memory System for multi-frequency feature processing
+        # Integrates multi-timescale learning directly into architecture
+        try:
+            from nestedfl.nested_learning.memory import ContinuumMemorySystem
+            # CMS layer after final backbone features (before exit3)
+            self.cms = ContinuumMemorySystem(
+                dim=feature_dims[3],  # Final feature dim (384)
+                num_levels=3,
+                chunk_sizes=[8, 32, 128],  # Multi-frequency update schedule
+            )
+            self.use_cms = True
+            logger.info(f"CMS layer added: dim={feature_dims[3]}, levels=3")
+        except ImportError:
+            self.cms = None
+            self.use_cms = False
+            logger.warning("CMS not available - continuing without")
+        
         # Optionally freeze backbone
         if freeze_backbone:
             for param in self.backbone.parameters():
@@ -566,10 +598,19 @@ class TimmPretrainedEarlyExit(nn.Module):
         features = self.backbone(x)
         # features is a list: [stage0, stage1, stage2, stage3, stage4]
         
+        # Apply CMS to final features for multi-frequency processing
+        if self.use_cms and self.cms is not None:
+            # CMS expects (batch, seq_len, dim) but we have (batch, channels, h, w)
+            # Reshape: (B, C, H, W) -> (B, H*W, C) for CMS -> back to (B, C, H, W)
+            B, C, H, W = features[3].shape
+            feat_reshaped = features[3].permute(0, 2, 3, 1).reshape(B, H*W, C)
+            feat_cms = self.cms(feat_reshaped)
+            features[3] = feat_cms.reshape(B, H, W, C).permute(0, 3, 1, 2)
+        
         # Early exits from intermediate stages
         y1 = self.exit1(features[1])  # After stage 1
         y2 = self.exit2(features[2])  # After stage 2
-        y3 = self.exit3(features[3])  # After stage 3
+        y3 = self.exit3(features[3])  # After stage 3 + CMS
         
         return y1, y2, y3
     

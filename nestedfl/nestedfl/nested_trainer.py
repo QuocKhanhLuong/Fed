@@ -103,12 +103,14 @@ class LocalSurpriseSignal:
     def compute_weights(
         self,
         per_sample_loss: torch.Tensor,
+        progress: float = 0.0,  # Training progress 0.0 to 1.0
     ) -> torch.Tensor:
         """
         Compute sample weights based on surprise signal.
         
         Args:
             per_sample_loss: Loss per sample (batch_size,)
+            progress: Training progress (0.0 = start, 1.0 = end)
             
         Returns:
             Sample weights (batch_size,) - higher weight for surprising samples
@@ -136,9 +138,12 @@ class LocalSurpriseSignal:
         # Clamp LSS to prevent extreme outliers from dominating
         lss = lss.clamp(min=0.1, max=10.0)
         
-        # Apply temperature (higher = more uniform weights)
-        # Use higher temperature (2.0) for stability
-        temp = max(self.temperature, 2.0)
+        # Adaptive temperature: increases linearly from 2.0 to 5.0
+        # Early training (progress=0): temp=2.0 → focus on hard samples
+        # Late training (progress=1): temp=5.0 → more uniform learning
+        base_temp = max(self.temperature, 2.0)
+        temp = base_temp + 3.0 * progress  # 2.0 → 5.0
+        
         weights = torch.softmax(lss / temp, dim=0) * len(lss)
         
         # Additional clamp on final weights
@@ -804,7 +809,10 @@ class NestedEarlyExitTrainer:
                     
                     # Apply LSS weighting (harder samples get more weight)
                     if self.use_lss:
-                        lss_weights = self.lss.compute_weights(combined_per_sample)
+                        # Calculate training progress for adaptive temperature
+                        total_steps = epochs * len(train_loader)
+                        progress = step_counter / max(total_steps, 1)
+                        lss_weights = self.lss.compute_weights(combined_per_sample, progress=progress)
                         loss_ce = (combined_per_sample * lss_weights).mean()
                     else:
                         loss_ce = combined_per_sample.mean()
@@ -851,8 +859,10 @@ class NestedEarlyExitTrainer:
                         
                         # Apply same LSS weighting for consistency
                         if self.use_lss:
-                            # Reuse weights from fast loop (already computed)
-                            lss_w = self.lss.compute_weights(combined_ps)
+                            # Same progress as fast loop for consistency
+                            total_steps = epochs * len(train_loader)
+                            progress = step_counter / max(total_steps, 1)
+                            lss_w = self.lss.compute_weights(combined_ps, progress=progress)
                             loss_slow = (combined_ps * lss_w).mean()
                         else:
                             loss_slow = combined_ps.mean()
