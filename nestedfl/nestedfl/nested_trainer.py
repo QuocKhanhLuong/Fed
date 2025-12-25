@@ -582,10 +582,23 @@ class NestedEarlyExitTrainer:
             - stage1, stage2, stage3 backbone
             - These preserve global knowledge
         """
-        # Fast: Exit classifiers
-        self.fast_params = list(self.model.exit1.parameters()) + \
-                          list(self.model.exit2.parameters()) + \
-                          list(self.model.exit3.parameters())
+        # Fast: Exit classifiers (handle both nested CMS and simple modes)
+        if hasattr(self.model, 'use_nested_exits') and self.model.use_nested_exits:
+            # Nested CMS mode: exit1_pool, exit1_cms, exit1_fc, etc.
+            self.fast_params = list(self.model.exit1_pool.parameters()) + \
+                              list(self.model.exit1_cms.parameters()) + \
+                              list(self.model.exit1_fc.parameters()) + \
+                              list(self.model.exit2_pool.parameters()) + \
+                              list(self.model.exit2_cms.parameters()) + \
+                              list(self.model.exit2_fc.parameters()) + \
+                              list(self.model.exit3_pool.parameters()) + \
+                              list(self.model.exit3_cms.parameters()) + \
+                              list(self.model.exit3_fc.parameters())
+        else:
+            # Simple mode: exit1, exit2, exit3 (Sequential)
+            self.fast_params = list(self.model.exit1.parameters()) + \
+                              list(self.model.exit2.parameters()) + \
+                              list(self.model.exit3.parameters())
         
         # Slow: Backbone (handle both model types)
         if hasattr(self.model, 'backbone'):
