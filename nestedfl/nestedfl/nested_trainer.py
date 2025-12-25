@@ -93,24 +93,29 @@ class LocalSurpriseSignal:
         Args:
             enabled: Whether LSS is active
             temperature: Controls sharpness of weighting (higher = more uniform)
-            ema_decay: Decay for running mean loss estimation
+            ema_decay: Decay for running mean estimation
         """
         self.enabled = enabled
         self.temperature = temperature
         self.ema_decay = ema_decay
-        self.running_mean_loss = None
+        self.running_mean_grad_norm = None
         
     def compute_weights(
         self,
         per_sample_loss: torch.Tensor,
         progress: float = 0.0,  # Training progress 0.0 to 1.0
+        per_sample_grad_norm: torch.Tensor = None,  # Gradient norm per sample
     ) -> torch.Tensor:
         """
         Compute sample weights based on surprise signal.
         
+        For Q1 journal: uses gradient norm instead of loss for better
+        surprise signal (||∇L|| instead of L/E[L]).
+        
         Args:
-            per_sample_loss: Loss per sample (batch_size,)
+            per_sample_loss: Loss per sample (batch_size,) - fallback if no grad norm
             progress: Training progress (0.0 = start, 1.0 = end)
+            per_sample_grad_norm: Gradient norm per sample (batch_size,) - preferred
             
         Returns:
             Sample weights (batch_size,) - higher weight for surprising samples
@@ -118,22 +123,33 @@ class LocalSurpriseSignal:
         if not self.enabled:
             return torch.ones_like(per_sample_loss)
         
-        # Clamp losses to prevent extreme values
-        per_sample_loss = per_sample_loss.clamp(min=1e-6, max=100.0)
-        
-        # Update running mean
-        batch_mean = per_sample_loss.mean().detach()
-        if self.running_mean_loss is None:
-            self.running_mean_loss = batch_mean
+        # Use gradient norm if available (Q1 journal requirement)
+        # Otherwise fallback to loss-based
+        if per_sample_grad_norm is not None:
+            surprise_signal = per_sample_grad_norm.clamp(min=1e-8, max=100.0)
+            # Update running mean of gradient norm
+            batch_mean = surprise_signal.mean().detach()
+            if self.running_mean_grad_norm is None:
+                self.running_mean_grad_norm = batch_mean
+            else:
+                self.running_mean_grad_norm = (
+                    self.ema_decay * self.running_mean_grad_norm + 
+                    (1 - self.ema_decay) * batch_mean
+                )
+            # Normalize by running mean
+            lss = surprise_signal / (self.running_mean_grad_norm + 1e-6)
         else:
-            self.running_mean_loss = (
-                self.ema_decay * self.running_mean_loss + 
-                (1 - self.ema_decay) * batch_mean
-            )
-        
-        # Compute normalized surprise (LSS)
-        # Higher loss = more surprising = higher weight
-        lss = per_sample_loss / (self.running_mean_loss + 1e-6)
+            # Fallback to loss-based (original behavior)
+            per_sample_loss = per_sample_loss.clamp(min=1e-6, max=100.0)
+            batch_mean = per_sample_loss.mean().detach()
+            if self.running_mean_grad_norm is None:
+                self.running_mean_grad_norm = batch_mean
+            else:
+                self.running_mean_grad_norm = (
+                    self.ema_decay * self.running_mean_grad_norm + 
+                    (1 - self.ema_decay) * batch_mean
+                )
+            lss = per_sample_loss / (self.running_mean_grad_norm + 1e-6)
         
         # Clamp LSS to prevent extreme outliers from dominating
         lss = lss.clamp(min=0.1, max=10.0)
@@ -154,7 +170,7 @@ class LocalSurpriseSignal:
     def get_stats(self) -> Dict[str, float]:
         """Get LSS statistics."""
         return {
-            'lss_running_mean': self.running_mean_loss.item() if self.running_mean_loss is not None else 0.0,
+            'lss_running_mean': self.running_mean_grad_norm.item() if self.running_mean_grad_norm is not None else 0.0,
         }
 
 
