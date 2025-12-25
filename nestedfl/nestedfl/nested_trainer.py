@@ -729,7 +729,8 @@ class NestedEarlyExitTrainer:
         # Use DeepMomentumGD for slow weights if enabled
         if self.use_deep_momentum:
             try:
-                from nestedfl.nested_learning.optimizers import DeepMomentumGD
+                # Try relative import first (works in Flower context)
+                from .nested_learning.optimizers import DeepMomentumGD
                 optimizer_slow = DeepMomentumGD(
                     params=self.slow_params,
                     lr=learning_rate,
