@@ -792,14 +792,8 @@ class NestedEarlyExitTrainer:
         step_counter = 0
         
         for epoch in range(epochs):
-            # Progress bar for batches
-            pbar = tqdm(
-                train_loader, 
-                desc=f"Epoch {epoch+1}/{epochs}",
-                leave=False,
-                ncols=100
-            )
-            for images, labels in pbar:
+            # Simple iteration without progress bar (cleaner logs for FL)
+            for images, labels in train_loader:
                 images = images.to(self.device, non_blocking=True)
                 labels = labels.to(self.device, non_blocking=True)
                 
@@ -930,12 +924,6 @@ class NestedEarlyExitTrainer:
                     all_labels = []
                 all_preds.extend(y3.argmax(1).cpu().tolist())
                 all_labels.extend(labels.cpu().tolist())
-                
-                # Update progress bar
-                pbar.set_postfix({
-                    'loss': f'{total_loss / total_samples:.4f}',
-                    'acc': f'{100 * total_correct / total_samples:.1f}%'
-                })
             
             # Calculate per-epoch metrics
             epoch_acc = total_correct / max(total_samples, 1)
