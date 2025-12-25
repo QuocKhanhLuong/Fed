@@ -295,6 +295,11 @@ class SharedMemoryPool(nn.Module):
         """Process gradient through appropriate memory module."""
         bucket = self.get_bucket(param_numel)
         memory = self.memories[str(bucket)]
+        
+        # Auto-move memory to same device as input
+        if next(memory.parameters()).device != grad.device:
+            self.memories[str(bucket)] = memory.to(grad.device)
+            memory = self.memories[str(bucket)]
 
         # Pad or truncate to bucket size
         if param_numel < bucket:
