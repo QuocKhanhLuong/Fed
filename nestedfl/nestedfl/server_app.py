@@ -1,8 +1,17 @@
 """
-nestedfl: Nested Early-Exit Federated Learning ServerApp
+FedEEP ServerApp — Phase-controlled FL orchestration
 
-Flower 1.18+ Message API implementation for centralized FL coordination
-with FedAvg/FedProx aggregation.
+Phase schedule:
+  Phase 0 (rounds  1-20): backbone warmup (only Exit4)
+  Phase 1 (rounds 21-40): multi-exit CE (all 4 exits)
+  Phase 2 (rounds 41-60): fast/slow split + CMS
+  Phase 3 (rounds 61-80): + knowledge distillation chain
+  Phase 4 (rounds 81-100): full system
+
+Strategy (config key "strategy"):
+  "fedavg"  → FedAvgStrategy  (baseline)
+  "fedprox" → FedProxStrategy (stronger baseline)
+  "edpa"    → EDPAStrategy    (proposed, default)
 """
 
 import json
@@ -13,204 +22,214 @@ from pathlib import Path
 import torch
 from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.serverapp import Grid, ServerApp
-from flwr.serverapp.strategy import FedAvg, FedProx
 
-# Setup logging (creates timestamped log file)
-from nestedfl.logging_config import setup_logging, get_log_file
-setup_logging()
-
-from nestedfl.task import get_model, test, load_data
+from nestedfl.strategies import get_strategy
 
 logger = logging.getLogger(__name__)
-
-# Create ServerApp
 app = ServerApp()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase Controller
+# ─────────────────────────────────────────────────────────────────────────────
+
+PHASE_MILESTONES = {
+    "phase_1_round": 20,   # Multi-exit activation
+    "phase_2_round": 40,   # Fast/Slow + CMS
+    "phase_3_round": 60,   # Knowledge Distillation
+    "phase_4_round": 80,   # Full system (= EDPA active on server)
+}
+
+PHASE_NAMES = {
+    0: "Backbone Warmup (Exit4 only)",
+    1: "Multi-Exit CE (4 exits)",
+    2: "Fast/Slow + CMS",
+    3: "Self-Distillation (KD chain)",
+    4: "Full FedEEP",
+}
+
+
+def get_current_phase(server_round: int, milestones: dict) -> int:
+    """Map server_round → phase index 0..4."""
+    if server_round <= milestones["phase_1_round"]:
+        return 0
+    if server_round <= milestones["phase_2_round"]:
+        return 1
+    if server_round <= milestones["phase_3_round"]:
+        return 2
+    if server_round <= milestones["phase_4_round"]:
+        return 3
+    return 4
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Centralized Evaluation
+# ─────────────────────────────────────────────────────────────────────────────
+
 def get_evaluate_fn(num_classes: int, dataset: str):
-    """
-    Create centralized evaluation function.
-    
-    This evaluates the global model on the full test set after each round.
-    """
+    """Build centralized evaluation function for the server."""
+
     def evaluate_fn(server_round: int, arrays: ArrayRecord):
-        """Evaluate global model on centralized test set."""
+        import torch
+        from nestedfl.data.cifar100 import CIFAR100FederatedDataset
+        from models.convnext_early_exit import ConvNeXtEarlyExit
+
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        
-        # Load model with global weights
-        model = get_model(num_classes=num_classes, use_pretrained=True)
-        
-        # Filter out thop keys if present
-        state_dict = {k: v for k, v in arrays.to_torch_state_dict().items()
-                      if 'total_ops' not in k and 'total_params' not in k}
+        model = ConvNeXtEarlyExit(num_classes=num_classes, pretrained=False)
+        state_dict = arrays.to_torch_state_dict()
         model.load_state_dict(state_dict, strict=False)
         model.to(device)
-        
-        # Load full test set (partition_id=0 just to get testloader)
-        _, testloader = load_data(partition_id=0, num_partitions=1, dataset=dataset)
-        
-        # Evaluate with exit stats
-        result = test(model, testloader, device, return_exit_stats=True)
-        
-        if len(result) == 3:
-            loss, accuracy, exit_stats = result
-            print(f"[Server] Round {server_round}: loss={loss:.4f}, acc={accuracy:.4f}")
-            print(f"  Exit Accuracies: Exit1={exit_stats['exit1_acc']:.4f}, "
-                  f"Exit2={exit_stats['exit2_acc']:.4f}, Exit3={exit_stats['exit3_acc']:.4f}")
-            
-            # Return metrics with exit stats
-            return {
-                "loss": float(loss), 
-                "accuracy": float(accuracy),
-                "exit1_acc": float(exit_stats['exit1_acc']),
-                "exit2_acc": float(exit_stats['exit2_acc']),
-                "exit3_acc": float(exit_stats['exit3_acc']),
-            }
-        else:
-            loss, accuracy = result
-            print(f"[Server] Round {server_round}: loss={loss:.4f}, acc={accuracy:.4f}")
-            return {"loss": float(loss), "accuracy": float(accuracy)}
-    
+        model.eval()
+
+        data = CIFAR100FederatedDataset(num_partitions=1, alpha=0.5)
+        _, testloader = data.get_partition(0)
+
+        correct = total = total_loss = 0.0
+        criterion = torch.nn.CrossEntropyLoss()
+        exit_counts = [0] * 4
+
+        with torch.no_grad():
+            for images, labels in testloader:
+                images, labels = images.to(device), labels.to(device)
+                logits, exits = model(images, threshold=0.8)
+                total_loss += criterion(logits, labels).item()
+                correct += (logits.argmax(1) == labels).sum().item()
+                total += labels.size(0)
+                for e in exits.cpu().tolist():
+                    exit_counts[e] += 1
+
+        accuracy = correct / max(total, 1)
+        avg_loss = total_loss / max(len(testloader), 1)
+
+        logger.info(
+            f"Server eval round {server_round}: "
+            f"loss={avg_loss:.4f} acc={accuracy:.4f} exits={exit_counts}"
+        )
+        return {
+            "loss": float(avg_loss),
+            "accuracy": float(accuracy),
+            "exit_distribution": str(exit_counts),
+        }
+
     return evaluate_fn
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
 @app.main()
 def main(grid: Grid, context: Context) -> None:
-    """
-    Main entry point for the ServerApp.
-    
-    Orchestrates federated learning with:
-    - FedAvg or FedProx aggregation (configurable)
-    - Centralized evaluation
-    - Result saving
-    """
-    # Read run config
-    fraction_train: float = context.run_config.get("fraction-train", 1.0)
-    fraction_eval: float = context.run_config.get("fraction-evaluate", 0.5)
-    num_rounds: int = context.run_config.get("num-server-rounds", 10)
-    lr: float = context.run_config.get("lr", 0.001)
-    dataset: str = context.run_config.get("dataset", "cifar100")
-    num_classes = 100 if dataset == "cifar100" else 10
-    
-    # Strategy selection
-    strategy_name: str = context.run_config.get("strategy", "fedprox")
-    proximal_mu: float = context.run_config.get("proximal-mu", 0.1)  # FedProx regularization
-    
-    # Nested Learning config
-    fast_lr_mult: float = context.run_config.get("fast-lr-mult", 3.0)
-    slow_update_freq: int = context.run_config.get("slow-update-freq", 5)
-    use_distillation: bool = context.run_config.get("use-distillation", True)
-    cms_enabled: bool = context.run_config.get("cms-enabled", True)
-    use_lss: bool = context.run_config.get("use-lss", True)
-    
+    cfg = context.run_config
+
+    # ── Config ────────────────────────────────────────────────────────────────
+    num_rounds: int    = cfg.get("num-server-rounds", 100)
+    dataset: str       = cfg.get("dataset", "cifar100")
+    num_classes: int   = 100 if dataset == "cifar100" else 10
+    lr: float          = cfg.get("lr", 0.001)
+    strategy_name: str = cfg.get("strategy", "edpa")
+
+    fraction_train: float = cfg.get("fraction-train", 0.8)
+    fraction_eval: float  = cfg.get("fraction-evaluate", 0.5)
+    min_fit: int           = cfg.get("min-train-clients", 2)
+
+    # EDPA-specific
+    edpa_gamma: float  = cfg.get("edpa-gamma", 0.5)
+    proximal_mu: float = cfg.get("proximal-mu", 0.01)
+
+    # Phase milestones (can override in config)
+    milestones = {
+        "phase_1_round": cfg.get("phase-1-round", PHASE_MILESTONES["phase_1_round"]),
+        "phase_2_round": cfg.get("phase-2-round", PHASE_MILESTONES["phase_2_round"]),
+        "phase_3_round": cfg.get("phase-3-round", PHASE_MILESTONES["phase_3_round"]),
+        "phase_4_round": cfg.get("phase-4-round", PHASE_MILESTONES["phase_4_round"]),
+    }
+
     print(f"\n{'='*60}")
-    print(f"Nested Early-Exit Federated Learning")
+    print(f"FedEEP — Federated Early-Exit with Progressive Phases")
     print(f"{'='*60}")
-    print(f"Dataset: {dataset} ({num_classes} classes)")
-    print(f"Strategy: {strategy_name.upper()}" + (f" (μ={proximal_mu})" if strategy_name == "fedprox" else ""))
-    print(f"Rounds: {num_rounds}")
-    print(f"Learning rate: {lr}")
-    print(f"")
-    print(f"Nested Learning Features:")
-    print(f"  - Fast LR Multiplier: {fast_lr_mult}")
-    print(f"  - Slow Update Freq (K): {slow_update_freq}")
-    print(f"  - Self-Distillation: {use_distillation}")
-    print(f"  - CMS (Memory): {cms_enabled}")
-    print(f"  - LSS (Surprise): {use_lss}")
+    print(f"Dataset   : {dataset} ({num_classes} classes)")
+    print(f"Strategy  : {strategy_name.upper()}")
+    print(f"Rounds    : {num_rounds}")
+    print(f"LR        : {lr}")
+    print(f"Phase milestones: {milestones}")
     print(f"{'='*60}\n")
-    
-    # Load global model
-    global_model = get_model(num_classes=num_classes, use_pretrained=True)
-    arrays = ArrayRecord(global_model.state_dict())
-    
-    print(f"Global model initialized: {sum(p.numel() for p in global_model.parameters())} parameters")
-    
-    # Initialize strategy based on config
-    if strategy_name.lower() == "fedprox":
-        strategy = FedProx(
-            fraction_train=fraction_train,
-            fraction_evaluate=fraction_eval,
-            proximal_mu=proximal_mu,
-        )
-        print(f"Using FedProx strategy with μ={proximal_mu}")
-    else:
-        strategy = FedAvg(
-            fraction_train=fraction_train,
-            fraction_evaluate=fraction_eval,
-        )
-        print(f"Using FedAvg strategy")
-    
-    # Start strategy
-    result = strategy.start(
-        grid=grid,
-        initial_arrays=arrays,
-        train_config=ConfigRecord({"lr": lr, "proximal_mu": proximal_mu}),
-        num_rounds=num_rounds,
-        evaluate_fn=get_evaluate_fn(num_classes, dataset),
+
+    # ── Global model initialization ───────────────────────────────────────────
+    from models.convnext_early_exit import ConvNeXtEarlyExit
+    global_model = ConvNeXtEarlyExit(num_classes=num_classes, pretrained=True)
+    initial_arrays = ArrayRecord(global_model.state_dict())
+    print(f"Global model: {sum(p.numel() for p in global_model.parameters()):,} params")
+
+    # ── Strategy ─────────────────────────────────────────────────────────────
+    strategy_kwargs = dict(
+        fraction_train=fraction_train,
+        fraction_evaluate=fraction_eval,
+        min_fit_clients=min_fit,
+        min_evaluate_clients=max(1, min_fit // 2),
+        min_available_clients=min_fit,
     )
-    
-    # Save final model
+    if strategy_name == "edpa":
+        strategy_kwargs["gamma"] = edpa_gamma
+    elif strategy_name == "fedprox":
+        strategy_kwargs["proximal_mu"] = proximal_mu
+
+    strategy = get_strategy(strategy_name, **strategy_kwargs)
+    print(f"Strategy initialized: {strategy_name.upper()}")
+
+    # ── FL rounds with phase injection ────────────────────────────────────────
+    history = []
+    arrays = initial_arrays
+
+    for server_round in range(1, num_rounds + 1):
+        phase = get_current_phase(server_round, milestones)
+
+        # Detect phase change
+        if server_round == 1 or phase != get_current_phase(server_round - 1, milestones):
+            print(f"\n>>> Round {server_round}: entering Phase {phase} — {PHASE_NAMES[phase]}")
+
+        # Build per-round train config (sent to ALL selected clients)
+        train_config = ConfigRecord({
+            "lr":            lr,
+            "phase":         phase,
+            "proximal_mu":   proximal_mu if strategy_name == "fedprox" else 0.0,
+        })
+
+        # Run one round
+        result = strategy.start(
+            grid=grid,
+            initial_arrays=arrays,
+            train_config=train_config,
+            num_rounds=1,
+            evaluate_fn=get_evaluate_fn(num_classes, dataset),
+        )
+
+        arrays = result.arrays
+        round_metrics = {
+            "round": server_round,
+            "phase": phase,
+            **(result.metrics or {}),
+        }
+        history.append(round_metrics)
+        logger.info(f"Round {server_round} done: {round_metrics}")
+
+    # ── Save results ──────────────────────────────────────────────────────────
     results_dir = Path("results")
     results_dir.mkdir(exist_ok=True)
-    
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     model_path = results_dir / f"model_{dataset}_{strategy_name}_{timestamp}.pt"
-    
-    print(f"\nSaving final model to {model_path}...")
-    state_dict = result.arrays.to_torch_state_dict()
-    torch.save(state_dict, model_path)
-    
-    # Save metrics
+    torch.save(result.arrays.to_torch_state_dict(), model_path)
+
     metrics_path = results_dir / f"metrics_{dataset}_{strategy_name}_{timestamp}.json"
-    
-    # Extract metrics from result (train and eval)
-    train_history = []
-    eval_history = []
-    
-    # Get metrics from result if available
-    if hasattr(result, 'metrics') and result.metrics:
-        # Direct metrics from result
-        for key, value in result.metrics.items():
-            if 'train' in key.lower():
-                train_history.append({key: value})
-            elif 'eval' in key.lower() or 'acc' in key.lower() or 'loss' in key.lower():
-                eval_history.append({key: value})
-    
-    # Try to get history from strategy if available  
-    if hasattr(result, 'history'):
-        if hasattr(result.history, 'metrics_distributed_fit'):
-            for round_num, metrics in enumerate(result.history.metrics_distributed_fit, 1):
-                train_history.append({"round": round_num, **metrics})
-        if hasattr(result.history, 'metrics_distributed'):
-            for round_num, metrics in enumerate(result.history.metrics_distributed, 1):
-                eval_history.append({"round": round_num, **metrics})
-    
-    metrics_data = {
-        "timestamp": datetime.now().isoformat(),
-        "config": {
-            "dataset": dataset,
-            "strategy": strategy_name,
-            "proximal_mu": proximal_mu,
-            "num_rounds": num_rounds,
-            "lr": lr,
-            "nested_learning": {
-                "fast_lr_mult": fast_lr_mult,
-                "slow_update_freq": slow_update_freq,
-                "use_distillation": use_distillation,
-                "cms_enabled": cms_enabled,
-                "use_lss": use_lss,
-            },
-        },
-        "history": {
-            "train_metrics": train_history,
-            "eval_metrics": eval_history,
-        }
-    }
-    
-    with open(metrics_path, 'w') as f:
-        json.dump(metrics_data, f, indent=2)
-    
-    print(f"Metrics saved to {metrics_path}")
+    with open(metrics_path, "w") as f:
+        json.dump({
+            "config": dict(cfg),
+            "history": history,
+        }, f, indent=2, default=str)
+
     print(f"\n{'='*60}")
-    print(f"FL Training Complete!")
+    print(f"Training complete!")
+    print(f"Model  : {model_path}")
+    print(f"Metrics: {metrics_path}")
     print(f"{'='*60}")

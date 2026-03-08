@@ -21,7 +21,6 @@ dependencies = [
     "timm>=0.9.0",
     "numpy>=1.21.0",
     "scikit-learn>=1.0.0",
-    "einops>=0.6.0",  # Required for FullyNestedCMS
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -39,29 +38,46 @@ clientapp = "nestedfl.client_app:app"
 # Run Configuration
 # =====================================================================
 [tool.flwr.app.config]
-# FL Settings
-num-server-rounds = 20
-fraction-train = 0.8      # 80% of clients per round
+# ── FL Settings ────────────────────────────────────────────────
+num-server-rounds = 100
+fraction-train = 0.8
 fraction-evaluate = 0.5
-min-train-clients = 5     # Minimum 5 clients for aggregation
+min-train-clients = 5
 
-# Training
+# ── Training ────────────────────────────────────────────────────
 local-epochs = 5
-lr = 0.003
+lr = 0.001
 batch-size = 32
+dirichlet-alpha = 0.5
 
-# Dataset
-dataset = "cifar100"  # or "cifar10"
-num-classes = 100
+# ── Dataset ─────────────────────────────────────────────────────
+dataset = "cifar100"
 
-# Nested Learning Parameters (3 Q1 Features Enabled for Testing)
-fast-lr-mult = 3.0        # Stable with Non-IID
-slow-update-freq = 5      # Base value, adaptive K uses this
-use-distillation = true   # ENABLED for testing (weight=0.3)
-distillation-weight = 0.3 
-cms-enabled = true        # FullyNestedCMS (use_residual=False)
-use-lss = true            # LSS with adaptive temp
-use-dmgd = true           # DeepMomentumGD (l2_regression mode)
+# ── Strategy: "fedavg" | "fedprox" | "edpa" ─────────────────────
+strategy = "edpa"
+proximal-mu = 0.01          # FedProx only
+edpa-gamma = 0.5            # EDPA λ_k = 1/(1 + γk)
+
+# ── Progressive Phase Milestones (rounds) ───────────────────────
+phase-1-round = 20          # Activate multi-exit CE
+phase-2-round = 40          # Activate fast/slow + CMS
+phase-3-round = 60          # Activate KD chain
+phase-4-round = 80          # Full FedEEP
+
+# ── Nested Learning ─────────────────────────────────────────────
+fast-lr-mult = 3.0
+slow-update-freq = 5
+
+# ── Knowledge Distillation ──────────────────────────────────────
+kd-weight = 0.3
+kd-temp = 4.0
+
+# ── CMS Regularization ──────────────────────────────────────────
+cms-weight = 0.1
+
+# ── Disabled features ───────────────────────────────────────────
+use-lss = false
+use-dmgd = false
 
 # =====================================================================
 # Federations
