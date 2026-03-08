@@ -1,184 +1,94 @@
-# Nested Early-Exit Federated Learning
+# FedEEP — Federated Early-Exit with Progressive Phases
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch 1.10+](https://img.shields.io/badge/PyTorch-1.10+-ee4c2c.svg)](https://pytorch.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+Flower 1.18+ implementation of depth-aware personalized aggregation for early-exit networks.
 
-## 🎯 Overview
+## Architecture
 
-**Difficulty-Aware Federated Learning with Nested Early-Exit Networks**
+- **Backbone:** ConvNeXt-Tiny (pretrained, 27.8M params)
+- **Exits:** 4 exit heads (GAP → LayerNorm → Linear)
+- **Aggregation:** EDPA — λ_k = 1/(1+γk), deeper exits get more personalization
+- **Local Training:** Fast/Slow split + CMS regularization + Self-Distillation chain
 
-Implementation of Nested Learning (NeurIPS 2025) for Federated Learning, featuring:
+## Quick Start
 
-| Feature | Description |
-|---------|-------------|
-| **Nested Learning** | Multi-timescale optimization (fast/slow weights) |
-| **Early-Exit MobileViTv2** | 3 exit points with difficulty-aware inference |
-| **Local Surprise Signal (LSS)** | Sample importance weighting |
-| **Continuum Memory System (CMS)** | 4-level memory for catastrophic forgetting |
-| **QUIC Transport** | Low-latency communication with 0-RTT |
+```bash
+# Activate environment
+conda activate fl-quic
 
-## 🏗️ Architecture
+# Install
+cd nestedfl
+pip install -e .
 
-```
-┌────────────────────────────────────────────────────────────────┐
-│                    FL Server (RTX 4070)                        │
-│  • QUIC Server (Port 4433)                                     │
-│  • FedProx/FedDyn Aggregation                                  │
-└────────────────────┬───────────────────────────────────────────┘
-                     │ QUIC (0-RTT + Multiplexing)
-     ┌───────────────┼───────────────┐
-     ▼               ▼               ▼
-┌──────────┐  ┌──────────┐  ┌──────────────┐
-│ Client 1 │  │ Client 2 │  │ Jetson Nano  │
-│ RTX GPU  │  │ RTX GPU  │  │ Edge Device  │
-└──────────┘  └──────────┘  └──────────────┘
+# Run full FedEEP (100 rounds, EDPA, progressive phases)
+flwr run
 
-Each client runs:
-┌─────────────────────────────────────────────┐
-│        NestedEarlyExitTrainer               │
-│  ┌─────────────────────────────────────┐    │
-│  │ MobileViTv2 + Early Exit (3 exits)  │    │
-│  │ Fast weights: Exit classifiers      │    │
-│  │ Slow weights: Backbone              │    │
-│  └─────────────────────────────────────┘    │
-│  + LSS (Local Surprise Signal)              │
-│  + CMS (4-level Continuum Memory)           │
-└─────────────────────────────────────────────┘
+# Run with specific strategy (ablation)
+flwr run --run-config "strategy=fedavg num-server-rounds=50"
+flwr run --run-config "strategy=fedprox num-server-rounds=50"
+flwr run --run-config "strategy=edpa num-server-rounds=100"
 ```
 
-## 📁 Project Structure
+## Progressive Phases
+
+| Phase | Rounds | Components Active |
+|-------|--------|-------------------|
+| 0     | 1-20   | Backbone warmup (Exit4 only) |
+| 1     | 21-40  | Multi-exit CE (all 4 exits) |
+| 2     | 41-60  | + Fast/Slow split + CMS regularization |
+| 3     | 61-80  | + Self-Distillation KD chain |
+| 4     | 81-100 | Full FedEEP system |
+
+## Configuration
+
+Edit `pyproject.toml`:
+
+```toml
+strategy = "edpa"           # "fedavg" | "fedprox" | "edpa"
+edpa-gamma = 0.5            # EDPA personalization curve
+phase-1-round = 20          # Multi-exit activation round
+cms-weight = 0.1            # CMS regularization strength
+kd-weight = 0.3             # Self-distillation weight
+kd-temp = 4.0               # KD temperature
+fast-lr-mult = 3.0          # Exit heads LR multiplier
+slow-update-freq = 5        # Backbone update every K steps
+```
+
+## Project Structure
 
 ```
-Fed/
-├── client/                     # FL Client
-│   ├── nested_trainer.py       # ⭐ Main trainer (LSS, CMS, DMGD)
-│   ├── early_exit_trainer.py   # Basic early-exit trainer
-│   ├── app_client.py           # CLI entry point
-│   └── data_manager.py         # Dataset loading
-├── server/                     # FL Server
-│   ├── quic_server.py          # QUIC connection handler
-│   └── feddyn_aggregator.py    # Aggregation strategies
+nestedfl/
 ├── models/
-│   └── early_exit_mobilevit.py # MobileViTv2 + 3 Early Exits
-├── scripts/
-│   ├── run_experiment.py       # ⭐ IEEE-style experiment runner
-│   ├── setup.sh                # Linux setup
-│   └── setup_conda.sh          # macOS setup
-├── jetson/
-│   ├── run_client.sh           # ⭐ One-click Jetson setup
-│   └── README.md
-├── tests/
-│   ├── test_nested_features.py # ⭐ Test LSS, DMGD, CMS
-│   └── test_model.py
-└── utils/
-    ├── config.py               # Configuration
-    └── torch_compat.py         # PyTorch 1.x/2.x compatibility
+│   └── convnext_early_exit.py      # ConvNeXt-Tiny + 4 ExitHeads
+├── nestedfl/
+│   ├── client_app.py               # Flower ClientApp (phase-aware)
+│   ├── server_app.py               # Flower ServerApp (phase controller)
+│   ├── nested_trainer.py           # Local trainer + CMS + KD
+│   ├── task.py                     # Model & data utilities
+│   ├── checkpoint_manager.py       # Best/periodic model saving
+│   ├── logging_config.py           # Experiment logging
+│   ├── strategies/
+│   │   ├── fedavg_strategy.py      # FedAvg baseline
+│   │   ├── fedprox_strategy.py     # FedProx baseline
+│   │   └── edpa_strategy.py        # EDPA (proposed)
+│   └── data/
+│       ├── base.py                 # Abstract FederatedDataset
+│       └── cifar100.py             # CIFAR-100 Dirichlet α=0.5
+└── pyproject.toml                  # Configuration
 ```
 
-## 🚀 Quick Start
+## Key Design Decisions
 
-### Installation
+- **CMS is NOT in the model** — it's an external loss term in the trainer, never sent to server (zero communication overhead)
+- **EDPA λ_k** — backbone (k=0) gets λ=1.0 (full global), exit4 (k=4) gets λ=0.33 (most personalized)
+- **Trainer cached across rounds** — CMS memory buffers persist, preventing catastrophic forgetting
+- **Phase is server-controlled** — prevents de-sync when clients drop/rejoin
 
-```bash
-git clone https://github.com/QuocKhanhLuong/Fed.git
-cd Fed
+## Ablation Table (Paper)
 
-# Option 1: Conda (recommended)
-./scripts/setup_conda.sh
-
-# Option 2: pip
-pip install -r requirements.txt
-```
-
-### Run Experiment (Simulation Mode)
-
-```bash
-# Quick test - 1 client, 5 rounds
-python scripts/run_experiment.py \
-    --mode simulation \
-    --num_clients 1 \
-    --num_rounds 5 \
-    --dataset cifar10 \
-    --batch_size 64
-
-# Full experiment - 10 clients, non-IID
-python scripts/run_experiment.py \
-    --mode simulation \
-    --num_clients 10 \
-    --num_rounds 50 \
-    --dataset cifar100 \
-    --partition dirichlet \
-    --alpha 0.5
-```
-
-### Run on Jetson Nano
-
-```bash
-# One-click setup and run
-./jetson/run_client.sh --server <SERVER_IP>
-```
-
-## ⚙️ Key Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--num_clients` | 10 | Number of FL clients K |
-| `--num_rounds` | 50 | Communication rounds T |
-| `--local_epochs` | 5 | Local epochs E |
-| `--partition` | dirichlet | Data partition (iid, dirichlet) |
-| `--alpha` | 0.5 | Dirichlet α (lower = more non-IID) |
-| `--use_lss` | True | Enable Local Surprise Signal |
-| `--cms_levels` | 4 | CMS memory levels |
-| `--use_dmgd` | False | Enable Deep Momentum GD |
-
-## 🔬 Nested Learning Features (NeurIPS 2025)
-
-### 1. Local Surprise Signal (LSS)
-
-```python
-# Weights samples by "surprise" (loss magnitude)
-LSS(x) = loss(x) / E[loss]
-# Higher loss = more surprising = higher weight
-```
-
-### 2. Continuum Memory System (CMS)
-
-```python
-# 4-level memory with exponential update frequencies
-update_freqs = [1, 5, 25, 125]  # Steps between updates
-# Fast layer: adapts immediately
-# Anchor layer: preserves long-term knowledge
-```
-
-### 3. Deep Momentum GD (Optional)
-
-```python
-# MLP-based momentum instead of EMA
-DeepMomentum: gradient → MLP → momentum_update
-```
-
-## 📊 Running Tests
-
-```bash
-# Test Nested Learning features
-python tests/test_nested_features.py
-
-# Test model training
-python tests/test_model.py
-```
-
-## 📝 Citation
-
-```bibtex
-@article{luong2025nestedexit,
-  title={Difficulty-Aware Federated Learning with Nested Early-Exit Networks},
-  author={Luong, Quoc Khanh},
-  journal={IEEE Transactions on Mobile Computing},
-  year={2025}
-}
-```
-
-## 📄 License
-
-MIT License - see LICENSE file for details.
+| Row | Config | Description |
+|-----|--------|-------------|
+| 1   | `strategy=fedavg` | FedAvg (baseline) |
+| 2   | `strategy=fedprox` | FedProx (stronger baseline) |
+| 3   | `strategy=edpa` | FedEEP-EDPA (proposed) |
+| 4   | `strategy=edpa cms-weight=0` | FedEEP-noCMS |
+| 5   | `strategy=edpa kd-weight=0` | FedEEP-noKD |
