@@ -1,0 +1,48 @@
+# FedEEP ChestMNIST experiment config
+# Usage: python -m src.fedeep_main --config configs/medmnist_chest_fedeep.yaml
+
+dataset: medmnist_chest
+num_classes: 14
+data_dir: ./data
+pretrained: true
+
+# FL settings
+num_clients: 10
+num_rounds: 100
+local_epochs: 5
+fraction_train: 0.8
+
+# Training
+lr: 0.001
+batch_size: 32
+use_amp: true
+seed: 42
+
+# Data partitioning
+dirichlet_alpha: 0.5
+
+# Strategy
+strategy: edpa
+edpa_gamma: 0.5
+
+# Progressive phase milestones
+phases:
+  phase_1_round: 20
+  phase_2_round: 40
+  phase_3_round: 60
+  phase_4_round: 80
+
+# Nested learning
+nested:
+  fast_lr_mult: 3.0
+  slow_update_freq: 5
+
+# Knowledge distillation
+kd:
+  weight: 0.3
+  temperature: 4.0
+
+# CMS regularization
+cms:
+  weight: 0.1
+  decay_rates: [0.90, 0.99, 0.999, 0.9999]

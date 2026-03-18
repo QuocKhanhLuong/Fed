@@ -1,0 +1,48 @@
+# FedEEP CIFAR-100 experiment config
+# Usage: python -m src.fedeep_main --config configs/cifar100_fedeep.yaml
+
+dataset: cifar100
+num_classes: 100
+data_dir: ./data
+pretrained: true
+
+# FL settings
+num_clients: 10
+num_rounds: 100
+local_epochs: 5
+fraction_train: 0.8
+
+# Training
+lr: 0.001
+batch_size: 32
+use_amp: true
+seed: 42
+
+# Data partitioning
+dirichlet_alpha: 0.5
+
+# Strategy: fedavg | fedprox | edpa
+strategy: edpa
+edpa_gamma: 0.5
+
+# Progressive phase milestones (round numbers)
+phases:
+  phase_1_round: 20    # Activate multi-exit CE
+  phase_2_round: 40    # Activate fast/slow + CMS
+  phase_3_round: 60    # Activate KD chain
+  phase_4_round: 80    # Full FedEEP
+
+# Nested learning (fast/slow)
+nested:
+  fast_lr_mult: 3.0
+  slow_update_freq: 5
+
+# Knowledge distillation chain
+kd:
+  weight: 0.3
+  temperature: 4.0
+
+# CMS regularization
+cms:
+  weight: 0.1
+  decay_rates: [0.90, 0.99, 0.999, 0.9999]
