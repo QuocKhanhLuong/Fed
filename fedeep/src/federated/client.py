@@ -45,7 +45,7 @@ class Client:
         self.num_samples = num_samples
 
     def set_weights(self, state_dict: OrderedDict) -> None:
-        """Load global model weights from server."""
+        """Load global model weights (also snapshots for FedProx)."""
         self.trainer.set_weights(state_dict)
 
     def local_train(
@@ -53,6 +53,8 @@ class Client:
         epochs: int,
         phase: int,
         learning_rate: float,
+        server_round: int = 1,
+        num_rounds: int = 100,
     ) -> Dict[str, float]:
         """
         Run local training for the current FL round.
@@ -61,6 +63,8 @@ class Client:
             epochs:        Number of local epochs.
             phase:         Training phase (0-4).
             learning_rate: Base learning rate.
+            server_round:  Current FL round (for LR scheduler).
+            num_rounds:    Total FL rounds (for LR scheduler).
 
         Returns:
             Training metrics dict.
@@ -70,6 +74,8 @@ class Client:
             train_loader=self.train_loader,
             epochs=epochs,
             learning_rate=learning_rate,
+            server_round=server_round,
+            num_rounds=num_rounds,
         )
         return metrics
 

@@ -17,13 +17,14 @@ Strategy:
 import logging
 import random
 from collections import OrderedDict
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from src.federated.aggregation import (
     build_param_depth_map,
     edpa_aggregate,
     fedavg,
 )
+from src.utils.checkpoint import save_checkpoint
 
 logger = logging.getLogger("fedeep.server")
 
@@ -54,20 +55,27 @@ def run_fl(
     global_model,
     config: dict,
     evaluate_fn=None,
+    wandb_logger: Optional[Callable] = None,
+    checkpoint_dir: Optional[str] = None,
+    start_round: int = 1,
+    initial_weights: Optional[OrderedDict] = None,
+    edpa_client_states: Optional[Dict] = None,
 ) -> List[Dict]:
     """
     Run the full federated learning loop.
 
     Args:
-        clients:      List of Client instances.
-        global_model: ConvNeXtEarlyExit model (used for initial weights
-                      and param_depth_map).
-        config:       Dict with keys:
-                        num_rounds, local_epochs, lr, strategy,
-                        fraction_train, milestones (dict with phase_*_round),
-                        edpa_gamma (for EDPA strategy).
-        evaluate_fn:  Optional callable(global_weights, round) -> metrics.
-                      If None, uses first client's test_loader.
+        clients:            List of Client instances.
+        global_model:       ConvNeXtEarlyExit model (for initial weights + depth map).
+        config:             Dict with keys: num_rounds, local_epochs, lr, strategy,
+                            fraction_train, milestones, edpa_gamma, eval_every,
+                            proximal_mu.
+        evaluate_fn:        Optional callable(global_weights, round) -> metrics.
+        wandb_logger:       Optional callable(metrics_dict) to log to wandb.
+        checkpoint_dir:     Directory for saving best/periodic checkpoints.
+        start_round:        First round (>1 when resuming).
+        initial_weights:    Pre-loaded global weights (for resume).
+        edpa_client_states: Pre-loaded EDPA client states (for resume).
 
     Returns:
         List of per-round metrics dicts (the training history).
@@ -77,6 +85,7 @@ def run_fl(
     lr = config["lr"]
     strategy = config.get("strategy", "fedavg")
     fraction = config.get("fraction_train", 1.0)
+    eval_every = config.get("eval_every", 1)
     milestones = config.get("milestones", {
         "phase_1_round": 20,
         "phase_2_round": 40,
@@ -85,16 +94,24 @@ def run_fl(
     })
 
     # Initial global weights
-    global_weights = OrderedDict(
-        (k, v.detach().cpu()) for k, v in global_model.state_dict().items()
-    )
+    if initial_weights is not None:
+        global_weights = initial_weights
+    else:
+        global_weights = OrderedDict(
+            (k, v.detach().cpu()) for k, v in global_model.state_dict().items()
+        )
 
     # EDPA state
     param_depth_map: Optional[Dict[int, int]] = None
-    edpa_client_states: Dict[int, OrderedDict] = {}
+    if edpa_client_states is None:
+        edpa_client_states = {}
     if strategy == "edpa":
         param_depth_map = build_param_depth_map(global_model)
         logger.info(f"EDPA param_depth_map: {len(param_depth_map)} params")
+
+    # Best model tracking
+    best_acc = 0.0
+    best_round = 0
 
     history: List[Dict] = []
 
@@ -102,17 +119,18 @@ def run_fl(
     print(f"FedEEP — Federated Early-Exit with Progressive Phases")
     print(f"{'='*60}")
     print(f"Strategy  : {strategy.upper()}")
-    print(f"Rounds    : {num_rounds}")
+    print(f"Rounds    : {start_round}..{num_rounds}")
     print(f"Clients   : {len(clients)} (fraction={fraction})")
     print(f"LR        : {lr}")
+    print(f"Eval every: {eval_every} rounds")
     print(f"Milestones: {milestones}")
     print(f"{'='*60}\n")
 
-    for server_round in range(1, num_rounds + 1):
+    for server_round in range(start_round, num_rounds + 1):
         phase = get_current_phase(server_round, milestones)
 
         # Log phase transitions
-        if server_round == 1 or phase != get_current_phase(
+        if server_round == start_round or phase != get_current_phase(
             server_round - 1, milestones
         ):
             print(
@@ -138,6 +156,8 @@ def run_fl(
                 epochs=local_epochs,
                 phase=phase,
                 learning_rate=lr,
+                server_round=server_round,
+                num_rounds=num_rounds,
             )
             client_weights_list.append(client.get_weights())
             client_sizes_list.append(client.num_samples)
@@ -157,38 +177,97 @@ def run_fl(
             global_weights = fedavg(client_weights_list, client_sizes_list)
 
         # ── Evaluation ────────────────────────────────────────────────────
-        round_metrics = {
+        round_metrics: Dict = {
             "round": server_round,
             "phase": phase,
             "strategy": strategy,
             "num_clients": len(selected),
         }
 
-        if evaluate_fn is not None:
-            eval_metrics = evaluate_fn(global_weights, server_round)
+        should_eval = (
+            server_round % eval_every == 0
+            or server_round == num_rounds
+            or server_round == start_round
+        )
+
+        if should_eval:
+            # Global evaluation
+            if evaluate_fn is not None:
+                eval_metrics = evaluate_fn(global_weights, server_round)
+            else:
+                clients[0].set_weights(global_weights)
+                eval_metrics = clients[0].evaluate()
             round_metrics.update(eval_metrics)
-        else:
-            # Default: load global weights into first client and evaluate
-            clients[0].set_weights(global_weights)
-            eval_metrics = clients[0].evaluate()
-            round_metrics.update(eval_metrics)
+
+            # Per-client local evaluation (sample up to 3 clients)
+            local_accs = []
+            eval_clients = random.sample(clients, min(3, len(clients)))
+            for c in eval_clients:
+                c.set_weights(global_weights)
+                c_metrics = c.evaluate()
+                local_accs.append(c_metrics["accuracy"])
+            round_metrics["local_acc_mean"] = sum(local_accs) / len(local_accs)
+            round_metrics["local_acc_min"] = min(local_accs)
+            round_metrics["local_acc_max"] = max(local_accs)
+
+            # Best model tracking
+            acc = round_metrics.get("accuracy", 0.0)
+            if acc > best_acc:
+                best_acc = acc
+                best_round = server_round
+                round_metrics["is_best"] = True
+                if checkpoint_dir:
+                    save_checkpoint(
+                        state_dict=global_weights,
+                        config=config,
+                        round_num=server_round,
+                        path=f"{checkpoint_dir}/best_model.pt",
+                    )
+            else:
+                round_metrics["is_best"] = False
+
+            round_metrics["best_acc"] = best_acc
+            round_metrics["best_round"] = best_round
 
         history.append(round_metrics)
 
+        # ── Logging ───────────────────────────────────────────────────────
         acc = round_metrics.get("accuracy", 0.0)
         loss = round_metrics.get("loss", 0.0)
-        logger.info(
-            f"Round {server_round}/{num_rounds} phase={phase} "
-            f"loss={loss:.4f} acc={acc:.4f}"
-        )
-        print(
-            f"  Round {server_round:3d}/{num_rounds} | "
-            f"Phase {phase} | "
-            f"loss={loss:.4f} | acc={acc:.4f}"
-        )
+        local_mean = round_metrics.get("local_acc_mean", 0.0)
+
+        if should_eval:
+            logger.info(
+                f"Round {server_round}/{num_rounds} phase={phase} "
+                f"loss={loss:.4f} acc={acc:.4f} local_mean={local_mean:.4f} "
+                f"best={best_acc:.4f}@{best_round}"
+            )
+            print(
+                f"  Round {server_round:3d}/{num_rounds} | "
+                f"Phase {phase} | "
+                f"loss={loss:.4f} | acc={acc:.4f} | "
+                f"local={local_mean:.4f} | "
+                f"best={best_acc:.4f}@R{best_round}"
+            )
+        else:
+            print(f"  Round {server_round:3d}/{num_rounds} | Phase {phase} | (no eval)")
+
+        # wandb logging
+        if wandb_logger is not None:
+            wandb_logger(round_metrics)
+
+        # Periodic checkpoint every 10 rounds
+        if checkpoint_dir and server_round % 10 == 0:
+            save_checkpoint(
+                state_dict=global_weights,
+                config=config,
+                round_num=server_round,
+                path=f"{checkpoint_dir}/round_{server_round:03d}.pt",
+            )
 
     print(f"\n{'='*60}")
-    print(f"Training complete! {num_rounds} rounds.")
+    print(f"Training complete! Rounds {start_round}..{num_rounds}.")
+    print(f"Best accuracy: {best_acc:.4f} at round {best_round}")
     print(f"{'='*60}")
 
     return history

@@ -11,6 +11,7 @@ num_clients: 10
 num_rounds: 100
 local_epochs: 5
 fraction_train: 0.8
+eval_every: 1             # evaluate every N rounds (1 = every round)
 
 # Training
 lr: 0.001
@@ -18,12 +19,19 @@ batch_size: 32
 use_amp: true
 seed: 42
 
+# Optimizer config
+optimizer:
+  type: adamw             # adamw | sgd
+  weight_decay: 0.01
+  lr_scheduler: cosine    # cosine | step | none
+
 # Data partitioning
 dirichlet_alpha: 0.5
 
 # Strategy: fedavg | fedprox | edpa
 strategy: edpa
 edpa_gamma: 0.5
+proximal_mu: 0.0          # FedProx mu (0 = disabled, typical: 0.001-0.01)
 
 # Progressive phase milestones (round numbers)
 phases:

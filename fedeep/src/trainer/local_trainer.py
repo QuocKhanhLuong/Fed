@@ -17,8 +17,9 @@ Fast/Slow split:
 
 import gc
 import logging
+import math
 from collections import OrderedDict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -35,13 +36,6 @@ class LocalTrainer:
     """
     FedEEP local trainer for ConvNeXtEarlyExit models.
 
-    Key design:
-    - CMS lives here (not in model) -- never aggregated by server
-    - Phase controls which components are active (set_phase each round)
-    - Fast params (exit heads) updated every step
-    - Slow params (backbone) updated every K steps with CMS regularization
-    - KD chain: Exit1<-Exit2<-Exit3<-Exit4 (deep teaches shallow)
-
     Args:
         model:              ConvNeXtEarlyExit model instance.
         device:             torch.device to use.
@@ -52,6 +46,10 @@ class LocalTrainer:
         kd_temperature:     Temperature T for soft targets.
         cms_decay_rates:    EMA decay rates for CMS buffers.
         cms_weight:         mu -- overall CMS loss scale.
+        proximal_mu:        FedProx proximal term weight (0 = disabled).
+        weight_decay:       Optimizer weight decay.
+        optimizer_type:     "adamw" or "sgd".
+        lr_scheduler:       "cosine", "step", or "none".
         use_mixed_precision: Enable AMP on CUDA.
     """
 
@@ -66,6 +64,10 @@ class LocalTrainer:
         kd_temperature: float = 4.0,
         cms_decay_rates: List[float] = None,
         cms_weight: float = 0.1,
+        proximal_mu: float = 0.0,
+        weight_decay: float = 0.01,
+        optimizer_type: str = "adamw",
+        lr_scheduler: str = "cosine",
         use_mixed_precision: bool = True,
     ):
         self.model = model.to(device)
@@ -77,6 +79,10 @@ class LocalTrainer:
         self.slow_update_freq = slow_update_freq
         self.kd_weight = kd_weight
         self.kd_temperature = kd_temperature
+        self.proximal_mu = proximal_mu
+        self.weight_decay = weight_decay
+        self.optimizer_type = optimizer_type
+        self.lr_scheduler_type = lr_scheduler
 
         self.cms = ContinuumMemorySystem(
             decay_rates=cms_decay_rates or [0.90, 0.99, 0.999, 0.9999],
@@ -95,9 +101,39 @@ class LocalTrainer:
         self.use_cms: bool = False
         self.use_kd: bool = False
 
+        # FedProx: snapshot of global weights before local training
+        self._global_params: Optional[List[torch.Tensor]] = None
+
         n_fast = sum(p.numel() for p in self.fast_params)
         n_slow = sum(p.numel() for p in self.slow_params)
-        logger.info(f"Trainer ready | fast={n_fast:,} slow={n_slow:,} | amp={self.use_amp}")
+        logger.info(
+            f"Trainer ready | fast={n_fast:,} slow={n_slow:,} | "
+            f"amp={self.use_amp} | optimizer={optimizer_type} | "
+            f"scheduler={lr_scheduler} | proximal_mu={proximal_mu}"
+        )
+
+    # ── Optimizer / Scheduler factory ─────────────────────────────────────────
+
+    def _make_optimizer(self, params, lr):
+        if self.optimizer_type == "sgd":
+            return torch.optim.SGD(
+                params, lr=lr,
+                momentum=0.9, weight_decay=self.weight_decay,
+            )
+        return torch.optim.AdamW(
+            params, lr=lr, weight_decay=self.weight_decay,
+        )
+
+    def _make_scheduler(self, optimizer, total_steps):
+        if self.lr_scheduler_type == "cosine" and total_steps > 0:
+            return torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=total_steps, eta_min=1e-6,
+            )
+        if self.lr_scheduler_type == "step" and total_steps > 0:
+            return torch.optim.lr_scheduler.StepLR(
+                optimizer, step_size=max(1, total_steps // 3), gamma=0.5,
+            )
+        return None
 
     # ── Phase control ─────────────────────────────────────────────────────────
 
@@ -131,12 +167,6 @@ class LocalTrainer:
         logits: Tuple[torch.Tensor, ...],
         labels: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Weighted cross-entropy across all active exits.
-
-        Phase 0: only Exit4 (final exit)
-        Phase 1+: all 4 exits with self.exit_weights
-        """
         if not self.use_multi_exit:
             return F.cross_entropy(logits[-1], labels)
 
@@ -149,14 +179,7 @@ class LocalTrainer:
         self,
         logits: Tuple[torch.Tensor, ...],
     ) -> torch.Tensor:
-        """
-        Self-distillation: chain E1<-E2<-E3<-E4.
-
-        Each shallower exit learns soft targets from the next deeper exit.
-        Teacher gradients are stopped (detach).
-
-        L_KD = sum_{k=1..3} KL(student_k(T) || teacher_{k+1}(T)) * T^2
-        """
+        """Self-distillation chain E1<-E2<-E3<-E4."""
         T = self.kd_temperature
         total_kd = torch.tensor(0.0, device=self.device)
         for student, teacher in zip(logits[:-1], logits[1:]):
@@ -166,6 +189,16 @@ class LocalTrainer:
             total_kd = total_kd + kl * (T ** 2)
         return total_kd
 
+    def _fedprox_loss(self) -> torch.Tensor:
+        """FedProx proximal term: (mu/2) * ||w - w_global||^2."""
+        if self._global_params is None or self.proximal_mu <= 0:
+            return torch.tensor(0.0, device=self.device)
+
+        prox = torch.tensor(0.0, device=self.device)
+        for p, gp in zip(self.model.parameters(), self._global_params):
+            prox = prox + (p - gp).pow(2).sum()
+        return (self.proximal_mu / 2.0) * prox
+
     # ── Training ──────────────────────────────────────────────────────────────
 
     def train(
@@ -173,9 +206,18 @@ class LocalTrainer:
         train_loader: torch.utils.data.DataLoader,
         epochs: int,
         learning_rate: float,
+        server_round: int = 1,
+        num_rounds: int = 100,
     ) -> Dict[str, float]:
         """
         Run E local epochs of FedEEP training.
+
+        Args:
+            train_loader:  Client's local DataLoader.
+            epochs:        Number of local epochs.
+            learning_rate: Base LR (scheduler adjusts from here).
+            server_round:  Current FL round (for scheduler scaling).
+            num_rounds:    Total FL rounds (for scheduler scaling).
 
         Returns dict of training metrics.
         """
@@ -184,24 +226,33 @@ class LocalTrainer:
             torch.cuda.empty_cache()
 
         self.model.train()
+        total_steps = epochs * len(train_loader)
+
+        # Scale LR by round progress for cosine across FL rounds
+        round_progress = (server_round - 1) / max(num_rounds, 1)
+        if self.lr_scheduler_type == "cosine":
+            adjusted_lr = learning_rate * (
+                0.5 * (1 + math.cos(math.pi * round_progress))
+            )
+            adjusted_lr = max(adjusted_lr, 1e-6)
+        else:
+            adjusted_lr = learning_rate
 
         if self.use_fast_slow:
-            optimizer_fast = torch.optim.AdamW(
-                self.fast_params,
-                lr=learning_rate * self.fast_lr_multiplier,
-                weight_decay=0.01,
+            optimizer_fast = self._make_optimizer(
+                self.fast_params, adjusted_lr * self.fast_lr_multiplier,
             )
-            optimizer_slow = torch.optim.AdamW(
-                self.slow_params,
-                lr=learning_rate,
-                weight_decay=0.01,
+            optimizer_slow = self._make_optimizer(
+                self.slow_params, adjusted_lr,
             )
+            sched_fast = self._make_scheduler(optimizer_fast, total_steps)
+            sched_slow = self._make_scheduler(optimizer_slow, total_steps)
         else:
-            optimizer_all = torch.optim.AdamW(
+            optimizer_all = self._make_optimizer(
                 list(self.fast_params) + list(self.slow_params),
-                lr=learning_rate,
-                weight_decay=0.01,
+                adjusted_lr,
             )
+            sched_all = self._make_scheduler(optimizer_all, total_steps)
 
         total_loss = 0.0
         total_correct = 0
@@ -218,6 +269,10 @@ class LocalTrainer:
                         images, labels, step_counter,
                         optimizer_fast, optimizer_slow,
                     )
+                    if sched_fast:
+                        sched_fast.step()
+                    if sched_slow and step_counter % self.slow_update_freq == 0:
+                        sched_slow.step()
                     with torch.no_grad():
                         with torch.amp.autocast("cuda", enabled=self.use_amp):
                             logits = self.model.forward_all_exits(images)
@@ -228,6 +283,8 @@ class LocalTrainer:
                     batch_loss, preds = self._step_single(
                         images, labels, optimizer_all
                     )
+                    if sched_all:
+                        sched_all.step()
 
                 total_loss += batch_loss * labels.size(0)
                 total_correct += (preds == labels).sum().item()
@@ -239,13 +296,15 @@ class LocalTrainer:
             "accuracy": total_correct / max(total_samples, 1),
             "num_samples": total_samples,
             "phase": self._phase,
+            "lr_used": adjusted_lr,
         }
         if self.use_cms:
             metrics.update(self.cms.get_stats())
 
         logger.info(
             f"Train phase={self._phase}: "
-            f"loss={metrics['loss']:.4f} acc={metrics['accuracy']:.4f}"
+            f"loss={metrics['loss']:.4f} acc={metrics['accuracy']:.4f} "
+            f"lr={adjusted_lr:.6f}"
         )
         return metrics
 
@@ -263,6 +322,7 @@ class LocalTrainer:
             loss = self._multi_exit_ce(logits, labels)
             if self.use_kd:
                 loss = loss + self.kd_weight * self._kd_loss(logits)
+            loss = loss + self._fedprox_loss()
 
         if self.scaler:
             self.scaler.scale(loss).backward()
@@ -290,7 +350,6 @@ class LocalTrainer:
         optimizer_slow: torch.optim.Optimizer,
     ):
         """Phase 2+: fast update every step, slow update every K steps."""
-        # ── Fast update (every step) ──────────────────────────────────────────
         optimizer_fast.zero_grad(set_to_none=True)
 
         with torch.amp.autocast("cuda", enabled=self.use_amp):
@@ -298,6 +357,7 @@ class LocalTrainer:
             loss_fast = self._multi_exit_ce(logits, labels)
             if self.use_kd:
                 loss_fast = loss_fast + self.kd_weight * self._kd_loss(logits)
+            loss_fast = loss_fast + self._fedprox_loss()
 
         if self.scaler:
             self.scaler.scale(loss_fast).backward(retain_graph=True)
@@ -310,7 +370,6 @@ class LocalTrainer:
             nn.utils.clip_grad_norm_(self.fast_params, 1.0)
             optimizer_fast.step()
 
-        # ── Slow update (every K steps) ───────────────────────────────────────
         if step_counter % self.slow_update_freq == 0:
             optimizer_slow.zero_grad(set_to_none=True)
 
@@ -321,6 +380,7 @@ class LocalTrainer:
                     loss_slow = loss_slow + self.kd_weight * self._kd_loss(logits_slow)
                 if self.use_cms:
                     loss_slow = loss_slow + self.cms.compute_loss(self.slow_params)
+                loss_slow = loss_slow + self._fedprox_loss()
 
             if self.scaler:
                 self.scaler.scale(loss_slow).backward()
@@ -376,15 +436,16 @@ class LocalTrainer:
     # ── FL parameter exchange ─────────────────────────────────────────────────
 
     def get_weights(self) -> OrderedDict:
-        """
-        Extract state_dict for FL aggregation.
-        CMS buffers are NOT included -- they stay local.
-        """
+        """Extract state_dict for FL aggregation (CMS excluded)."""
         return OrderedDict(
             (k, v.detach().cpu())
             for k, v in self.model.state_dict().items()
         )
 
     def set_weights(self, state_dict: dict) -> None:
-        """Load global model weights from server."""
+        """Load global model weights and snapshot for FedProx."""
         self.model.load_state_dict(state_dict, strict=False)
+        if self.proximal_mu > 0:
+            self._global_params = [
+                p.detach().clone() for p in self.model.parameters()
+            ]

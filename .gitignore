@@ -55,9 +55,10 @@ logs/
 *.crt
 *.pem
 
-# Dataset
-data/
+# Dataset (downloaded data, not source code)
+/data/
 datasets/
+!**/src/data/
 
 # Experiments
 experiments/
